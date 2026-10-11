@@ -1,0 +1,41 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- 数据与实验结果 ----
+# 这两类都是可重新生成的，而且体积可能到 GB 级。
+# 真实数据集建议单独放（NAS / 外部盘），用 --data-root 指过去，不要进版本库。
+data/
+runs/
+*.npz
+*.pth
+*.pt
+*.ckpt
+*.onnx
+*.engine
+
+# ---- 生成的报告与配图 ----
+report.md
+report.tex
+figs/
+.selftest_out/
+.mmdet_fake/
+.dbg_fake/
+
+# ---- 第三方仓库（mmdetection 等，用 git clone 单独管理）----
+third_party/
+
+# ---- 编辑器与系统 ----
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini

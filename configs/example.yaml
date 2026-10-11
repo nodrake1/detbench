@@ -1,0 +1,139 @@
+# DetBench 评测配置示例
+#
+# 用法：python tools/main.py eval --config configs/example.yaml
+#
+# 设计意图：**一个模型一个配置文件**，配置里写清所有影响结果的参数。
+# eval 会把整份配置存进 result.json，保证三个月后还能追溯。
+
+exp_id: demo_dummy_perfect
+notes: "占位检测器，验证管线"
+
+# --------------------------------------------------------------------------- #
+# 数据根目录（换设备的关键）
+#
+# 下面所有数据路径都写成**相对路径**，它们会拼到 data_root 下。
+# 换到另一台设备时，有三种方式指定新的数据位置，都不用改配置文件：
+#
+#   1. 命令行：  python tools/main.py eval --config configs/example.yaml --data-root /mnt/nas/HeliAir
+#   2. 环境变量：写 data_root: ${DETBENCH_DATA:-.}  然后 export DETBENCH_DATA=/mnt/nas/HeliAir
+#   3. 直接改这一行：data_root: /mnt/nas/HeliAir
+#
+# 优先级：命令行 --data-root  >  配置里的 data_root  >  相对配置文件所在目录
+#
+# 注意这里的 `..`：本文件在 configs/ 下，所以 `..` 就是项目根目录。
+# --------------------------------------------------------------------------- #
+data_root: ..
+
+# --------------------------------------------------------------------------- #
+# 数据
+# --------------------------------------------------------------------------- #
+dataset:
+  format: coco                    # coco | yolo | voc
+  name: HeliAir-demo
+  # COCO 标注文件（标准 instances_*.json），相对 data_root
+  ann_file: data/demo/annotations/instances_test.json
+  # 图像根目录；COCO 里的 file_name 是相对这个目录的路径
+  images_root: data/demo/images
+  # 属性表（CSV 或 JSON）：距离档 / 模糊档 / 光照档，分层评测依赖它
+  attr_file: data/demo/metadata/frames.csv
+
+  # ---- YOLO 格式时改用下面这些 ----
+  # format: yolo
+  # images_dir: data/demo/images/test
+  # labels_dir: data/demo/labels/test
+  # class_names: [helicopter]
+
+# --------------------------------------------------------------------------- #
+# 模型
+#
+# type 取值见 core/registry.py；新增模型只需加一个适配器文件。
+#   dummy            - 占位检测器（selftest 与管线验证用）
+#   yolov8           - ultralytics YOLO（v5/v8/v11 通用）
+#   yolov11          - 同 yolov8
+#   torchvision      - Faster R-CNN / RetinaNet / FCOS
+#   mmdet            - 任意 mmdetection 检测器
+#   detr / deformable_detr / dino / dino_detr / dab_detr / dn_detr
+#   rt_detr / mask2former / faster_rcnn_mmdet
+#                    - 都是 mmdet 适配器的语义化别名
+# --------------------------------------------------------------------------- #
+model:
+  type: dummy
+  mode: perfect                   # perfect | empty | jitter | random
+
+  # ---- DETR 系（推荐走 mmdetection）----
+  # 注意 1：config 必须是**本地 .py**，适配器不会联网下载配置文件。
+  #         Deformable DETR / DINO-DETR 的配置在 mmdetection 仓库的
+  #         configs/deformable_detr/ 与 configs/dino/ 下。
+  # 注意 2：**别用带 _tta 后缀的配置**，那会做多尺度增强，
+  #         速度慢一个数量级且与其他方法不可比。
+  # 注意 3：label_offset —— mmdet 的 DETR 系类别 0 是背景保留位，
+  #         单类模型预测标签是 1，所以默认减 1 映射到框架的 0-based 标签。
+  #         如果你的模型本身是 0-based，必须显式设为 0。
+  #
+  # type: deformable_detr
+  # config: third_party/mmdetection/configs/deformable_detr/deformable-detr_r50_16xb2-50e_coco.py
+  # checkpoint: runs/deformable_detr/epoch_50.pth
+  # label_offset: 1
+  # score_thresh: 0.001
+  # max_per_img: 300
+  # palette: none                 # 给 'none' 可省掉画框开销，不影响数值
+
+  # type: dino
+  # config: third_party/mmdetection/configs/dino/dino-4scale_r50_8xb2-12e_coco.py
+  # checkpoint: runs/dino/epoch_12.pth
+  # label_offset: 1
+  # max_per_img: 900              # DINO 默认 900 个 query
+
+  # ---- ultralytics YOLO ----
+  # type: yolov8
+  # weights: runs/detect/train/weights/best.pt
+  # imgsz: 1280
+  # conf: 0.001                   # ⚠️ 算 mAP 必须设很低，否则虚高
+  # iou: 0.7
+  # max_det: 300
+  # half: true
+
+  # ---- torchvision ----
+  # type: torchvision
+  # arch: fasterrcnn_resnet50_fpn
+  # weights: runs/frcnn/model.pth
+  # num_classes: 2                # 1 类目标 + 背景
+  # min_size: 800
+  # max_size: 1333
+
+# --------------------------------------------------------------------------- #
+# 评测
+# --------------------------------------------------------------------------- #
+eval:
+  # 推理时保留的最低分数。算 mAP 必须是 0.001 这种极低值，
+  # 否则会砍掉低分预测使 precision 虚高。部署阈值是另一回事，别混用。
+  predict_conf: 0.001
+  max_dets: 100                   # 对齐 COCO 的 maxDets
+  speed: true                     # 是否测 FPS / 延迟 / 峰值显存
+  fine_bins: true                 # 用细分尺寸桶（nano/tiny/small/...）
+
+  # ---- 分层评测维度 ----
+  # key="__size__" 为保留字，按 GT 框面积分桶，无需属性表。
+  # min_gt：组内 GT 少于该数量则跳过（样本太少时 AP 不可信）。
+  #         占位数据集很小，所以这里设 2 以便看到分组结果；
+  #         真实数据集上应设为 30~50，否则会得到一堆噪声指标。
+  groups:
+    - key: distance_bin
+      min_gt: 2
+    - key: blur
+      min_gt: 2
+    - key: lighting
+      min_gt: 2
+    - key: __size__
+      bins: fine
+      min_gt: 2
+
+# --------------------------------------------------------------------------- #
+# 运行时
+# --------------------------------------------------------------------------- #
+runtime:
+  device: cuda                    # cuda | cuda:0 | cuda:1 | cpu
+  seed: 0
+
+output:
+  dir: runs/demo_dummy_perfect    # result.json 与 predictions.npz 落在这里

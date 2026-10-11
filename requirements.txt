@@ -1,0 +1,16 @@
+# 核心依赖
+numpy>=1.24
+Pillow>=10.0
+
+# 配置与结果汇总
+PyYAML>=6.0
+
+# 画图（论文配图）
+matplotlib>=3.7
+
+# ---- 按需安装（用到哪个装哪个）----
+# torch>=2.1
+# torchvision>=0.16          # Faster R-CNN / RetinaNet 基线
+# ultralytics>=8.1           # YOLOv5/v8/v11
+# thop                       # FLOPs 统计（可选，fvcore 亦可）
+# scipy                      # 部分统计分析
