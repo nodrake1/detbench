@@ -1,0 +1,212 @@
+name: CI
+
+# 每次 push / PR 自动跑全部自检。
+#
+# 为什么值得配这个
+# ----------------
+# 本框架的自检是有实际价值的：指标实现的 bug 只表现为"mAP 偏低"，
+# 不报错、不崩溃，靠肉眼极难发现。如果改坏了评测代码又没跑 selftest，
+# 你会连续几天得到错误的实验数字，而且是在写论文时才发现。
+# 让 CI 替你把这一关，成本几乎为零。
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # 同一分支的新 push 会取消上一次还没跑完的任务，省 CI 时间
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ------------------------------------------------------------------ #
+  # 快速任务：指标实现自检（不依赖 matplotlib，秒级完成）
+  # ------------------------------------------------------------------ #
+  selftest:
+    name: selftest (${{ matrix.os }} / py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: 安装最小依赖
+        run: python -m pip install --upgrade pip numpy pillow
+
+      - name: 依赖体检
+        run: python tools/main.py doctor
+
+      - name: 指标实现自检
+        run: python tools/main.py selftest
+
+      - name: 管线行为检查
+        run: python scripts/check_pipeline.py
+
+      - name: mmdet 适配器逻辑自检（用假 mmdet，不需要真实安装）
+        run: python scripts/check_mmdet_adapter.py
+
+  # ------------------------------------------------------------------ #
+  # 完整链路：生成占位数据集 -> 评测 -> 汇总 -> 出图
+  # ------------------------------------------------------------------ #
+  pipeline:
+    name: 完整链路 (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装依赖
+        run: python -m pip install --upgrade pip numpy pillow matplotlib
+
+      - name: Linux 上装中文字体（否则中文标签渲染成方框）
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y fonts-noto-cjk
+
+      - name: 生成占位数据集
+        run: python tools/main.py make-demo --out data/demo
+
+      - name: 校验配置与路径解析（dry-run）
+        run: python tools/main.py eval --config configs/example.yaml --dry-run
+
+      - name: 评测
+        run: python tools/main.py eval --config configs/example.yaml
+
+      - name: 汇总出论文表格
+        run: python tools/main.py report --runs runs --out report.md --latex
+
+      - name: 生成论文配图
+        run: python tools/main.py figures --runs runs --out figs --config configs/example.yaml
+
+      - name: 绘图函数自检
+        run: python scripts/check_viz.py
+
+      - name: 检查产物齐全
+        shell: bash
+        run: |
+          set -e
+          test -f runs/demo_dummy_perfect/result.json
+          test -f runs/demo_dummy_perfect/predictions.npz
+          test -f report.md
+          test -f report.tex
+          ls figs/*.png
+          echo "全部产物已生成"
+
+      - name: 上传产物（方便直接看图和表）
+        uses: actions/upload-artifact@v4
+        if: runner.os == 'Linux'
+        with:
+          name: pipeline-output
+          path: |
+            report.md
+            report.tex
+            figs/*.png
+
+  # ------------------------------------------------------------------ #
+  # 数据集工具：转换 / 划分 / 质检 / 一致性 / 去冗余
+  # ------------------------------------------------------------------ #
+  dataset-tools:
+    name: 数据集工具
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip numpy pillow
+
+      - name: 生成占位数据集
+        run: python tools/main.py make-demo --out data/demo
+
+      - name: 数据集工具全流程检查（33 项）
+        run: python scripts/check_dataset_tools.py
+
+  # ------------------------------------------------------------------ #
+  # 训练脚本的配置生成与耗时预估（不需要 torch）
+  # ------------------------------------------------------------------ #
+  train-config:
+    name: 训练配置生成
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip numpy pillow
+
+      - name: 生成占位数据集
+        run: python tools/main.py make-demo --out data/demo
+
+      - name: 训练配置 dump（YOLO 后端与 base_config 无关，可在无 mmdet 环境验证）
+        run: python tools/train.py --config configs/train_example.yaml --backend ultralytics --dump-config
+
+      - name: 耗时预估
+        run: python tools/train.py --config configs/train_example.yaml --backend ultralytics --estimate-only
+
+      - name: 检查生成的 data.yaml
+        shell: bash
+        run: |
+          set -e
+          f=runs/demo_dino_r50/data.yaml
+          test -f "$f"
+          grep -q "nc: 1" "$f"
+          grep -q "helicopter" "$f"
+          echo "data.yaml 内容正确"
+
+  # ------------------------------------------------------------------ #
+  # 代码卫生：语法编译检查（不需要任何第三方依赖）
+  # ------------------------------------------------------------------ #
+  lint:
+    name: 语法编译检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 全部 Python 文件编译检查
+        shell: bash
+        run: |
+          set -e
+          python -m compileall -q core models tools scripts
+          echo "编译通过"
+
+      - name: 检查是否有意外提交的大文件
+        shell: bash
+        run: |
+          set -e
+          big=$(find . -path ./.git -prune -o -type f -size +1M -print)
+          if [ -n "$big" ]; then
+            echo "❌ 发现大于 1MB 的文件，不应提交到仓库："
+            echo "$big"
+            exit 1
+          fi
+          echo "没有大文件"
+
+      - name: 检查是否误提交数据或权重
+        shell: bash
+        run: |
+          set -e
+          bad=$(git ls-files | grep -E '^(data|runs|figs)/|\.(pth|pt|onnx|engine|npz)$' || true)
+          if [ -n "$bad" ]; then
+            echo "❌ 以下文件不应被 git 跟踪："
+            echo "$bad"
+            exit 1
+          fi
+          echo "没有被跟踪的数据/权重文件"

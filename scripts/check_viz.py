@@ -150,17 +150,21 @@ def main() -> int:
     except Exception as exc:
         check("空数据集统计图不崩溃", False, f"{type(exc).__name__}: {exc}")
 
-    # ---- 8. 中文字体检查（论文图里常有中文标签）----
+    # ---- 8. 中文字体（环境属性，只作提示不计失败）----
     from matplotlib import font_manager
 
-    cjk = [
+    cjk = sorted({
         f.name for f in font_manager.fontManager.ttflist
         if any(k in f.name for k in ("SimHei", "Microsoft YaHei", "SimSun", "Noto Sans CJK", "Source Han"))
-    ]
+    })
     if cjk:
-        check("系统有中文字体可用", True, f"例如 {sorted(set(cjk))[:3]}")
+        print(f"[note] 中文字体可用: {cjk[:3]}")
     else:
-        check("系统有中文字体可用", False, "没有中文字体，中文标签会显示成方框")
+        print(
+            "[note] ⚠️ 系统没有中文字体，中文标签会渲染成方框。\n"
+            "       Linux: sudo apt-get install -y fonts-noto-cjk\n"
+            "       这不影响框架其他功能，只影响中文标注的图。"
+        )
 
     # ---- 汇总 ----
     print("\n生成的图片：")

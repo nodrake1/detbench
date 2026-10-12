@@ -289,6 +289,119 @@ train, val, test = split_by_group(ds, group_key="clip_id", ratios=(0.7, 0.1, 0.2
 
 ---
 
+## 数据集工具
+
+`tools/dataset.py` 覆盖做数据集时的五件事。这些不是"锦上添花"——
+它们各自对应我在数据集指南里提过的一个具体坑。
+
+### 1. 格式转换（COCO ↔ YOLO ↔ VOC）
+
+```bash
+python tools/dataset.py convert --from coco --to yolo \
+    --ann data/HeliAir/annotations/instances_train.json \
+    --out data/HeliAir_yolo
+
+# 反向：YOLO -> COCO
+python tools/dataset.py convert --from yolo --to coco \
+    --images data/HeliAir/images \
+    --labels data/HeliAir_yolo/labels \
+    --class-names helicopter \
+    --out data/HeliAir_coco
+```
+
+`coco → yolo` 会额外生成 `classes.txt` 和 `image_list.txt`，后者可以直接喂给
+`rsync --files-from` 来拷图，不用手写脚本。
+
+**已处理的坑**：COCO 的 `file_name` 常带 split 前缀（`train/xxx.jpg`），
+而 YOLO 标签可能是平铺的也可能是同构嵌套的。反方向转换做了两级路径兜底
+（同构路径 → 文件名索引），并在布局错配到会产出空结果时**明确警告**。
+没有这个兜底，布局不一致时会静默产出 0 个标注 —— "转换成功"但结果全空，
+是最难发现的一类错误。
+
+### 2. 按架次分层划分
+
+```bash
+python tools/dataset.py split \
+    --ann data/HeliAir/annotations/instances_all.json \
+    --attr data/HeliAir/metadata/frames.csv \
+    --group-key clip_id --stratify-by distance_bin \
+    --out data/HeliAir/annotations
+```
+
+- 按 `clip_id`（飞行架次）分组，**同一架次绝不跨越划分** —— 防 scene leakage
+- `--stratify-by` 按属性轮流分配，保证每个划分里距离档/光照档都有覆盖。
+  纯随机划分可能让测试集只落到一个档位，分层评测直接失效
+- 输出三个 COCO 文件 + 一份 `split_manifest.csv` 划分清单（便于核对与复现）
+
+### 3. 质检
+
+```bash
+python tools/dataset.py check \
+    --ann data/HeliAir/annotations/instances_all.json \
+    --images data/HeliAir/images
+```
+
+检查项：图像文件是否存在、框宽高是否 ≤0、框是否越界、过小目标、
+极端长宽比、每图目标数、空图占比、类别不均衡、**同类高度重合的重复标注**。
+分「必须修」和「建议关注」两级，退出码可用于 CI。
+
+### 4. 标注一致性（两人互评）⭐
+
+```bash
+python tools/dataset.py agreement \
+    --ann-a ann_by_alice.json --ann-b ann_by_bob.json
+```
+
+把标注员 A 当真值、B 当预测算 mAP。**这是回应"标注质量如何保证"最有力的证据** ——
+不留主观描述，直接给出可写进论文的数字。工具会直接打印成句：
+
+```
+  以 A 为真值、B 为预测：
+    一致性 mAP@[.5:.95] = 0.703
+    一致性 mAP@0.5      = 1.000
+
+  逐目标最佳 IoU（A 的每个框对 B 的最佳匹配）:
+    p50 = 0.850
+    IoU > 0.5 的比例 = 91.3%
+
+  论文里可以这样写：
+    「随机抽取 192 帧由两位标注员独立标注，以一方为真值评测另一方，
+      一致性 mAP@0.5 为 1.000，逐目标最佳 IoU 中位数为 0.850。」
+```
+
+两个文件用**文件名**对齐（两份标注的 `image_id` 往往不同），并会报告
+目标数差异 —— 超过 10% 说明存在系统性漏标/多标。
+
+### 5. 抽帧去冗余 ⭐
+
+```bash
+python tools/dataset.py dedupe \
+    --images data/HeliAir/raw_frames \
+    --threshold 8 \
+    --move-to data/HeliAir/quarantine \
+    --report data/HeliAir/duplicates.csv
+```
+
+把视频逐帧导出是最常见也最有害的做法：相邻帧几乎相同，导致训练集内部冗余、
+以及 train/test 之间泄漏。这个命令用 aHash + dHash 检测近似重复帧：
+
+```
+  扫描 5400 个文件，哈希阈值 8（汉明距离）
+  保留 412 帧 / 判定重复 4988 帧（冗余率 92.4%）
+```
+
+**已知局限**（写在 `--help` 里）：aHash/dHash 只看**灰度结构**，
+这正是它能忽略曝光变化的原因，但也带来两个盲区：
+
+- **纯色或近似平坦的图无法区分**。实测若干不同颜色的纯色图，aHash 与 dHash
+  全都得到 0。这是设计使然。工具在发现大量图哈希相同时会明确警告，不会给你
+  一个看起来正常其实无意义的结果。
+- **只做全局比较**。目标移动但背景不变的帧全局哈希距离仍很小，会被判为重复 ——
+  对"抽帧去冗余"这个目的是期望行为，但若要保留目标位置变化的样本，
+  需调小阈值或先裁剪目标区域再哈希。
+
+---
+
 ## 接入一个新模型
 
 任何检测器只要实现两个方法就能接入统一评测。以自研模型为例：
@@ -864,6 +977,13 @@ python tools/main.py report --runs runs --out report.md --latex   # 汇总出论
 python tools/main.py figures --runs runs --out figs --config configs/example.yaml  # 生成论文配图
 
 python scripts/check_viz.py                          # 绘图函数自检（需要 matplotlib）
+python scripts/check_dataset_tools.py                # 数据集工具全流程检查（33 项）
+
+python tools/dataset.py convert --from coco --to yolo --ann <标注> --out <输出>
+python tools/dataset.py split  --ann <标注> --attr <属性表> --group-key clip_id --out <输出>
+python tools/dataset.py check  --ann <标注> --images <图像根>
+python tools/dataset.py agreement --ann-a <标注A> --ann-b <标注B>
+python tools/dataset.py dedupe --images <帧目录> --threshold 8
 
 python scripts/check_pipeline.py                     # 行为合理性检查（单调性等）
 python scripts/check_mmdet_adapter.py                # DETR 适配器逻辑自检（不需要装 mmdet）

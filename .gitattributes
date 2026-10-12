@@ -1,0 +1,28 @@
+# 统一换行符：仓库里一律用 LF，避免跨平台协作时出现满屏 CRLF 警告
+# 以及整文件"被修改"的假 diff。
+* text=auto eol=lf
+
+# Windows 批处理必须保持 CRLF，否则 cmd 会解析出错
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# PowerShell 脚本用 LF 即可（pwsh 两者都能读）
+*.ps1 text eol=lf
+
+# 二进制文件不要做任何转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.gif binary
+*.pth binary
+*.pt binary
+*.onnx binary
+*.npz binary
+*.zip binary
+*.pdf binary
+
+# 生成的产物：标记为「不是源码」，GitHub 语言统计里不计入
+figs/** linguist-generated=true
+report.md linguist-generated=true
+report.tex linguist-generated=true
