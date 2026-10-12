@@ -36,6 +36,7 @@ if str(ROOT.parent) not in sys.path:
 import numpy as np  # noqa: E402
 
 from detbench.core.io import DetSample  # noqa: E402
+from detbench.core.deps import force_utf8_output
 
 # --------------------------------------------------------------------------- #
 # 假的 mmdet / mmengine
@@ -193,6 +194,7 @@ def build_adapter(**overrides):
 
 
 def main() -> int:
+    force_utf8_output()
     fake_dir = ROOT / ".mmdet_fake"
     fake_dir.mkdir(parents=True, exist_ok=True)
     (fake_dir / "fake_config.py").write_text(

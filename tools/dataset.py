@@ -42,6 +42,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
+from detbench.core.deps import force_utf8_output
 
 import numpy as np  # noqa: E402
 
@@ -897,6 +898,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    force_utf8_output()
     args = build_parser().parse_args()
     try:
         return int(args.func(args) or 0)

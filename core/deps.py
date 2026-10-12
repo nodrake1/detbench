@@ -79,3 +79,36 @@ def describe_environment() -> dict:
         if ok:
             out[name] = module_version(name) or "?"
     return out
+
+
+def force_utf8_output() -> None:
+    """把 stdout/stderr 强制切到 UTF-8。
+
+    为什么必须做
+    ------------
+    Windows 控制台的默认编码取决于系统代码页：
+
+    * 英文/西欧 Windows -> ``cp1252``，**打印中文直接 UnicodeEncodeError 崩掉**
+    * 简体中文 Windows -> ``cp936``(GBK)，中文没问题，但打印 ``⚠️`` 这类
+      非 GBK 字符同样崩掉
+
+    也就是说"在自己机器上跑得好好的脚本，换台 Windows 就崩"，
+    而且报错看起来和业务逻辑毫无关系。GitHub Actions 的 windows runner
+    是 cp1252，会稳定复现。
+
+    ``errors="replace"`` 保证即使真遇到无法编码的字符，也只显示成 ``?``
+    而不是让整个程序挂掉 —— 打印诊断信息绝不该成为失败原因。
+    """
+    import sys
+
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        if stream is None:
+            continue
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue  # 被重定向成不支持 reconfigure 的对象，跳过
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass

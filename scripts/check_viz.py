@@ -29,6 +29,7 @@ from detbench.core.eval import build_size_decomposition, evaluate_stratified  # 
 from detbench.core.io import load_coco  # noqa: E402
 from detbench.core.metrics import FINE_AREA_BINS, GroupSpec, box_iou_matrix  # noqa: E402
 from detbench.models.dummy import DummyAdapter  # noqa: E402
+from detbench.core.deps import force_utf8_output
 
 DATA = ROOT / "data" / "demo"
 OUT = ROOT / ".viz_check"
@@ -51,6 +52,7 @@ def image_info(p: Path) -> str:
 
 
 def main() -> int:
+    force_utf8_output()
     print("=" * 74)
     print("可视化函数检查 (core/viz.py)")
     print("=" * 74)

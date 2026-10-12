@@ -30,6 +30,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
+from detbench.core.deps import force_utf8_output
 
 
 def hr(title: str = "") -> None:
@@ -173,6 +174,7 @@ def step_git(with_git: bool) -> bool:
 
 
 def main() -> int:
+    force_utf8_output()
     ap = argparse.ArgumentParser(
         description="DetBench 新设备引导脚本",
         formatter_class=argparse.RawDescriptionHelpFormatter,

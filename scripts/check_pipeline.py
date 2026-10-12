@@ -22,14 +22,37 @@ from detbench.core.eval import build_size_decomposition, evaluate_stratified  # 
 from detbench.core.io import load_coco  # noqa: E402
 from detbench.core.metrics import GroupSpec  # noqa: E402
 from detbench.models.dummy import DummyAdapter  # noqa: E402
+from detbench.core.deps import force_utf8_output
 
 DATA = ROOT / "data" / "demo"
 
 
+def _ensure_demo_dataset(ann: Path) -> bool:
+    """占位数据集不存在时自动生成。
+
+    没有这一步，本脚本在全新 checkout 上必然失败 —— ``data/`` 被 .gitignore
+    排除，CI 上拿不到数据集。让检查脚本自己准备前置数据，
+    比在每个调用点都记得先跑 make-demo 更可靠。
+    """
+    if ann.exists():
+        return True
+    print("占位数据集不存在，正在自动生成……")
+    try:
+        from detbench.scripts.make_demo_dataset import generate
+
+        generate(DATA, num_clips=12, frames_per_clip=16)
+        print()
+        return ann.exists()
+    except Exception as exc:
+        print(f"自动生成失败：{type(exc).__name__}: {exc}")
+        print("请手动运行：python tools/main.py make-demo")
+        return False
+
+
 def main() -> int:
+    force_utf8_output()
     ann = DATA / "annotations" / "instances_test.json"
-    if not ann.exists():
-        print("找不到占位数据集，请先运行：python tools/main.py make-demo")
+    if not _ensure_demo_dataset(ann):
         return 1
 
     ds = load_coco(

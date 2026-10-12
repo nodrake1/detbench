@@ -21,10 +21,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Dict, List, Tuple
 
 import numpy as np
+
+# 让脚本能独立运行：把包所在的父目录加入 sys.path
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT.parent) not in sys.path:
+    sys.path.insert(0, str(_ROOT.parent))
+
+from detbench.core.deps import force_utf8_output  # noqa: E402
 
 
 def _make_image(rng: np.random.RandomState, w: int, h: int, boxes: List[List[float]]) -> np.ndarray:
@@ -207,6 +215,7 @@ def generate(
 
 
 def main() -> None:
+    force_utf8_output()
     ap = argparse.ArgumentParser(description="生成用于打通管线的占位数据集")
     ap.add_argument("--out", default="data/demo", help="输出目录")
     ap.add_argument("--clips", type=int, default=8)

@@ -42,6 +42,7 @@ if str(ROOT.parent) not in sys.path:
 
 from detbench.core.config import load_and_resolve  # noqa: E402
 from detbench.core.deps import mmdet_available, probe, torch_available  # noqa: E402
+from detbench.core.deps import force_utf8_output
 
 
 def hr(t: str = "") -> None:
@@ -491,6 +492,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    force_utf8_output()
     args = build_parser().parse_args()
     try:
         return cmd_train(args)

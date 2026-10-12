@@ -12,6 +12,11 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT.parent) not in sys.path:
+    sys.path.insert(0, str(ROOT.parent))
+
+from detbench.core.deps import force_utf8_output  # noqa: E402
+
 PY = sys.executable
 WORK = ROOT / ".ds_test"
 DATA = ROOT / "data" / "demo"
@@ -31,6 +36,7 @@ def run(args: list[str]) -> tuple[int, str]:
 
 
 def main() -> int:
+    force_utf8_output()
     print("=" * 74)
     print("数据集工具检查 (tools/dataset.py)")
     print("=" * 74)

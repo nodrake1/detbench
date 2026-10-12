@@ -32,6 +32,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
+from detbench.core.deps import force_utf8_output  # noqa: E402
 from detbench.core.eval import COCO_IOU_THRESHOLDS, evaluate  # noqa: E402
 from detbench.core.io import DetDataset, load_coco  # noqa: E402
 from detbench.core.metrics import FINE_AREA_BINS, GroupSpec  # noqa: E402
@@ -742,6 +743,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    force_utf8_output()
     ap = build_parser()
     args = ap.parse_args()
     try:
