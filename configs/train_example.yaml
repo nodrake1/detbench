@@ -1,0 +1,124 @@
+# DetBench 训练配置示例
+#
+# 用法：
+#   python tools/train.py --config configs/train_example.yaml --dump-config   # 先看合并结果
+#   python tools/train.py --config configs/train_example.yaml --estimate-only # 估耗时
+#   python tools/train.py --config configs/train_example.yaml                 # 正式训练
+#
+# 换成你的数据：改下面 data_root 与 splits，其余基本不用动。
+# 换设备时数据位置不同：命令行 --data-root 或 --set dataset.data_root=<路径> 覆盖即可。
+
+exp_id: demo_dino_r50
+
+# --------------------------------------------------------------------------- #
+# 训练后端
+#   mmdet       —— Deformable DETR / DINO-DETR / DAB-DETR（DETR 全家族）
+#   ultralytics —— YOLO 全系（依赖少、速度快，适合先跑通）
+# --------------------------------------------------------------------------- #
+backend: mmdet
+
+data_root: ..
+
+# --------------------------------------------------------------------------- #
+# 数据集
+# --------------------------------------------------------------------------- #
+dataset:
+  name: HeliAir-demo
+  # ⚠️ 类别名必须显式给出，哪怕只有一个类。
+  #    mmdet 靠它决定类别语义；写错会让标签与类别整体错位。
+  class_names: [helicopter]
+
+  # 每张卡的 batch size。4060 Ti 16GB 上 DETR@800x1333 建议 2，配 grad_accum 补到等效 8~16
+  batch_size: 2
+  num_workers: 2
+
+  # 属性表：分层评测（距离档 / 模糊档 / 光照档）依赖它
+  attr_file: data/demo/metadata/frames.csv
+
+  # 三个 split。ann_file 相对 data_root；img_prefix 也相对 data_root。
+  splits:
+    train:
+      ann_file: data/demo/annotations/instances_train.json
+      img_prefix: data/demo/images/train
+    val:
+      ann_file: data/demo/annotations/instances_val.json
+      img_prefix: data/demo/images/val
+    test:
+      ann_file: data/demo/annotations/instances_test.json
+      img_prefix: data/demo/images/test
+
+# --------------------------------------------------------------------------- #
+# 模型
+# --------------------------------------------------------------------------- #
+model:
+  # ---- mmdet 后端 ----
+  # base_config 指向 mmdetection 仓库里的官方配置，**必须是本地 .py 文件**。
+  # 先 clone：git clone https://github.com/open-mmlab/mmdetection third_party/mmdetection
+  #
+  # 可选（按推荐度）：
+  #   DINO-DETR（收敛最快，12 轮出结果）:
+  #     third_party/mmdetection/configs/dino/dino-4scale_r50_8xb2-12e_coco.py
+  #   Deformable DETR（省显存，50 轮）:
+  #     third_party/mmdetection/configs/deformable_detr/deformable-detr_r50_16xb2-50e_coco.py
+  #   DAB-DETR（更轻量）:
+  #     third_party/mmdetection/configs/dab_detr/dab-detr_r50_8xb2-50e_coco.py
+  #
+  # ⚠️ 别用带 _tta 后缀的配置：它做多尺度增强，慢一个数量级且与其他方法不可比。
+  base_config: third_party/mmdetection/configs/dino/dino-4scale_r50_8xb2-12e_coco.py
+
+  # 冻结 backbone：小数据集（<10k 图）微调时几乎无损，省 ~30% 显存与时间
+  # 0 = 不冻结；1 = 冻结 stem+stage1；2 = 再冻 stage2 ...
+  frozen_stages: 1
+
+  # DDP + 小 batch 下 BatchNorm 统计会失真，换 SyncBN。
+  # 若已冻结 backbone（frozen_stages>=1），BN 不更新，可以设 false 省通信。
+  sync_bn: false
+
+  # 推理保留的预测数，**必须与评测阶段的 maxDets 一致**
+  max_per_img: 300
+
+  # mmdet 的 DETR 系类别 0 是背景保留位，预测标签从 1 开始。
+  # DetBench 评测端统一 0-based，靠这个偏移量对齐。改错会导致 mAP 莫名暴跌。
+  label_offset: 1
+
+  # ---- ultralytics 后端（把 backend 改成 ultralytics）----
+  # weights: yolo11m.pt
+  # imgsz: 1280
+  # device: "0"
+
+# --------------------------------------------------------------------------- #
+# 训练超参
+# --------------------------------------------------------------------------- #
+training:
+  epochs: 12               # DINO 官方就是 12 轮；Deformable DETR 要 50
+  grad_accum: 4            # 等效 batch = 2(每卡) × 1(卡) × 4 = 8
+  amp: true                # 混合精度：省 30~45% 显存 + 加速
+
+  # 学习率。**用 base_config 的原值时就不要设 lr** ——
+  # 官方学习率是配合它自己的 batch size 调的；你改了 batch 才需要按比例调。
+  # lr: 0.0001
+
+  val_interval: 1
+  ckpt_interval: 1
+  max_keep_ckpts: 3
+
+  # 耗时预估用的经验值（秒/iteration）。跑一次 --profile-iters 20 可以校准它。
+  assumed_sec_per_iter: 0.55
+
+# --------------------------------------------------------------------------- #
+# 运行时
+# --------------------------------------------------------------------------- #
+runtime:
+  work_dir: runs/demo_dino_r50
+  device: cuda
+  seed: 0
+
+# --------------------------------------------------------------------------- #
+# 训练结束后自动评测（写 result.json，可直接被 report 汇总）
+# --------------------------------------------------------------------------- #
+auto_eval: true
+
+eval:
+  predict_conf: 0.001      # 算 mAP 必须设很低，否则 precision 虚高
+  min_gt: 5                # 分层评测时，组内 GT 少于该数量则跳过
+  groups: [distance_bin, blur, lighting, __size__]

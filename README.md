@@ -99,24 +99,132 @@ python tools/main.py report --runs runs --out report.md --latex
 ```
 detbench/
 ├── core/
-│   ├── io.py        统一数据接口：COCO / YOLO / VOC + 属性表
-│   ├── metrics.py   ★ 分层 AP 计算（不依赖 pycocotools）
-│   ├── eval.py      评测主循环：mAP + 分层 mAP + 速度
-│   ├── speed.py     FPS / 延迟 / 峰值显存测量
-│   ├── results.py   实验记录 + 一键生成论文表
-│   ├── registry.py  模型适配器注册表
-│   ├── config.py    配置解析（内置零依赖 YAML）
-│   └── viz.py       论文配图：尺度曲线 / 条件柱状图 / PR / 失败案例
-├── models/          各检测库的适配器
-│   ├── dummy.py     占位检测器（自检与管线验证用）
-│   ├── yolov8.py    ultralytics YOLO（v5/v8/v11）
+│   ├── io.py            统一数据接口：COCO / YOLO / VOC + 属性表
+│   ├── metrics.py       ★ 分层 AP 计算（不依赖 pycocotools）
+│   ├── eval.py          评测主循环：mAP + 分层 mAP + 速度
+│   ├── train_config.py  ★ 训练配置生成（mmdet 继承+覆盖 / YOLO data.yaml）
+│   ├── speed.py         FPS / 延迟 / 峰值显存测量
+│   ├── results.py       实验记录 + 一键生成论文表
+│   ├── registry.py      模型适配器注册表
+│   ├── config.py        配置解析（内置零依赖 YAML）
+│   ├── deps.py          可选依赖探测
+│   └── viz.py           论文配图：尺度曲线 / 条件柱状图 / PR / 失败案例
+├── models/              各检测库的适配器
+│   ├── dummy.py         占位检测器（自检与管线验证用）
+│   ├── mmdet_detr.py    ★ mmdet DETR 全家族 + 任意 mmdet 检测器
+│   ├── yolov8.py        ultralytics YOLO（v5/v8/v11）
 │   └── torchvision_det.py   Faster R-CNN / RetinaNet / FCOS
-├── tools/main.py    CLI 入口
+├── tools/
+│   ├── main.py          CLI：doctor / selftest / make-demo / eval / report
+│   └── train.py         ★ CLI：训练（mmdet / ultralytics）+ 训练后自动评测
 ├── scripts/
+│   ├── bootstrap.py           新设备一键引导
 │   ├── make_demo_dataset.py   生成占位数据集
-│   └── check_pipeline.py      行为合理性检查（单调性等）
-├── configs/example.yaml
+│   ├── check_pipeline.py      行为合理性检查（单调性等）
+│   └── check_mmdet_adapter.py DETR 适配器逻辑自检（不需要装 mmdet）
+├── configs/
+│   ├── example.yaml           评测配置示例
+│   └── train_example.yaml     ★ 训练配置示例
 └── requirements.txt
+```
+
+---
+
+## 训练
+
+`tools/train.py` 支持两条后端，**训练结束后自动评测并写出 `result.json`**，
+所以"训练 → 评测 → 结果落盘"是一条命令完成的，不会出现"训完了忘了评测"。
+
+| 后端 | 覆盖模型 | 依赖 |
+|---|---|---|
+| `mmdet` | Deformable DETR / DINO-DETR / DAB-DETR / 任意 mmdet 检测器 | `mmengine mmcv mmdet` + clone mmdetection |
+| `ultralytics` | YOLO 全系 | `ultralytics` |
+
+### 1. 准备
+
+```bash
+# mmdet 后端
+pip install torch torchvision mmengine mmcv mmdet
+git clone https://github.com/open-mmlab/mmdetection third_party/mmdetection
+
+# 或 YOLO 后端（依赖少、速度快，适合先跑通）
+pip install torch torchvision ultralytics
+```
+
+### 2. 改配置
+
+复制 `configs/train_example.yaml`，主要改这几项：
+
+```yaml
+backend: mmdet
+data_root: ..                    # 换设备时用 --data-root 覆盖，不用改这里
+dataset:
+  class_names: [helicopter]      # ⚠️ 必须显式给，哪怕只有一个类
+  batch_size: 2                  # 每张卡
+  splits:                        # ann_file / img_prefix 都相对 data_root
+    train: {ann_file: annotations/instances_train.json, img_prefix: images/train}
+    val:   {ann_file: annotations/instances_val.json,   img_prefix: images/val}
+    test:  {ann_file: annotations/instances_test.json,  img_prefix: images/test}
+model:
+  base_config: third_party/mmdetection/configs/dino/dino-4scale_r50_8xb2-12e_coco.py
+  frozen_stages: 1               # 冻结 backbone，省 ~30% 显存与时间
+  max_per_img: 300               # 必须与评测的 maxDets 一致
+  label_offset: 1                # mmdet 类别 0 是背景保留位
+training:
+  epochs: 12
+  grad_accum: 4                  # 等效 batch = 2 × 1卡 × 4 = 8
+  amp: true
+```
+
+### 3. 训练
+
+```bash
+# 0) 先看合并后的配置对不对（30 秒，强烈建议先跑）
+python tools/train.py --config configs/train_example.yaml --dump-config
+
+# 1) 估耗时
+python tools/train.py --config configs/train_example.yaml --estimate-only
+
+# 2) 单卡训练
+python tools/train.py --config configs/train_example.yaml
+
+# 3) 双卡 DDP（两台机器各自跑一条，master_addr 填 rank0 的 IP）
+torchrun --nproc_per_node=1 --nnodes=2 --node_rank=0 \
+         --master_addr=<主节点IP> --master_port=29500 \
+         tools/train.py --config configs/train_example.yaml
+```
+
+### 4. 训练配置的三个隐蔽坑
+
+`tools/train.py` 帮你在开训前就把这些查出来：
+
+**① `class_names` 必须显式给。** mmdet 靠 `metainfo.classes` 决定类别语义。
+单类检测时 mmdet 的 `num_classes` 是 2（0 是背景），模型预测标签是 `1`，
+而 DetBench 评测端统一 0-based，靠 `label_offset: 1` 对齐。
+**单类场景下 `labels - 1` 恰好把 1 变成 0，看起来完全正确**；
+但类别数 ≥ 2 时所有类别会整体错位一位，mAP 莫名暴跌且不报错。
+
+**② 改了 `max_epochs` 必须同步改参数调度器。** 官方配置的学习率调度是按它
+自己的轮数写的（DINO 12e、Deformable DETR 50e）。如果只改 `epochs` 不改调度器：
+调度器比训练短 → 后期学习率一直是 0，模型停止学习；比训练长 → 学习率没衰减到位。
+**两种情况都不报错，只是训得差。** 本框架会自动按比例重设 `milestones` 和 `end`。
+
+**③ 等效 batch 太小会掉点。** DETR 系对 batch size 敏感。脚本会打印
+`batch × 卡数 × 累积`，低于 8 时给警告。4060 Ti 16GB 上 DETR@800×1333
+建议 `batch_size: 2` + `grad_accum: 4`。
+
+### 5. 训练后
+
+训练结束会自动：
+
+1. 找到最优权重（`best_bbox_mAP*.pth` / `best.pt`）
+2. 在 test split 上跑完整评测（含分层 mAP + 测速）
+3. 写出 `result.json` 到 `<work_dir>/eval/`
+
+然后照常汇总：
+
+```bash
+python tools/main.py report --runs runs --out report.md --latex
 ```
 
 ---
@@ -703,4 +811,8 @@ python tools/main.py report --runs runs --out report.md --latex   # 汇总出论
 
 python scripts/check_pipeline.py                     # 行为合理性检查（单调性等）
 python scripts/check_mmdet_adapter.py                # DETR 适配器逻辑自检（不需要装 mmdet）
+
+python tools/train.py --config configs/train_example.yaml --dump-config    # 检查训练配置
+python tools/train.py --config configs/train_example.yaml --estimate-only  # 估训练耗时
+python tools/train.py --config configs/train_example.yaml                  # 训练 + 自动评测
 ```
