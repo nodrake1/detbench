@@ -96,7 +96,18 @@ class TorchvisionAdapter(DetectorAdapter):
 
         img = Image.open(Path(image_root) / sample.file_name).convert("RGB")
         arr = np.asarray(img, dtype=np.float32) / 255.0
-        tensor = torch.from_numpy(arr).permute(2, 0, 1).to(self.device)
+
+        # 用 as_tensor 而不是 from_numpy。
+        #
+        # 原因：某些环境下 torch 的 C 扩展与 numpy 的 C API 版本不匹配，
+        # 会让 from_numpy 直接抛 `TypeError: expected np.ndarray (got numpy.ndarray)`
+        # —— 报错信息看起来像天方夜谭，但会让所有走 numpy 的推理代码全线崩溃。
+        # 实测（torch 2.7.1+cu128 + numpy 1.26.4）：
+        #     torch.from_numpy(a)  -> FAIL
+        #     torch.as_tensor(a)   -> OK
+        #     torch.tensor(a)      -> OK
+        # as_tensor 本身也是官方推荐的现代写法（能接受 list/ndarray/标量）。
+        tensor = torch.as_tensor(arr).permute(2, 0, 1).to(self.device)
 
         with torch.no_grad():
             out = self.model([tensor])[0]

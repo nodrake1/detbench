@@ -325,9 +325,12 @@ class TrainConfigBuilder:
 def build_yolo_dataset_yaml(train_cfg: Dict[str, Any], out_path: str | Path) -> Path:
     """生成 ultralytics 需要的 data.yaml。
 
-    ultralytics 不接受 COCO json，必须是它自己的 YOLO txt 布局：
+    ultralytics 不接受 COCO json，必须是它自己的 YOLO txt 布局::
+
         <root>/images/{train,val}/  <root>/labels/{train,val}/
-    如果你的数据是 COCO 格式，先用 ``detbench.core.io`` 转一下（见 README）。
+
+    如果你的数据是 COCO 格式，用 :func:`prepare_yolo_data` 自动转换，
+    或手动执行 ``tools/dataset.py convert``。
     """
     d = train_cfg.get("dataset", {})
     classes = list(d.get("class_names") or ["helicopter"])
@@ -345,11 +348,203 @@ def build_yolo_dataset_yaml(train_cfg: Dict[str, Any], out_path: str | Path) -> 
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    # 用 ascii 写入：ultralytics 与部分 yaml 解析器对非 ASCII 注释/编码的
-    # 处理不一致，训练配置这种"必须被正确读取"的文件不值得冒这个风险。
-    # 类别名本身仍按原样写入（中文类名会转义成 \uXXXX，YAML 解析后能正确还原）。
+    # 用 utf-8 写入。类别名可以是中文（YAML 解析后能正确还原）；
+    # 注释保持 ASCII，避免个别解析器对非 ASCII 注释的编码判断不一致。
     out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return out_path
+
+
+def _resolve_image(img_root: Path, file_name: str) -> Optional[Path]:
+    """把 COCO 的 ``file_name`` 解析成真实文件路径。
+
+    为什么需要多级兜底
+    ------------------
+    COCO 的 ``file_name`` 与配置里的 ``img_prefix`` 有两种常见约定，
+    而且真实项目里两种都会遇到：
+
+    **约定 A（共享根）**：``file_name`` 自带 split 前缀，所有 split 共用同一个根::
+
+        img_prefix = data/HeliAir/images
+        file_name  = train/clip000_f0000.jpg     -> data/HeliAir/images/train/clip000_f0000.jpg
+
+    **约定 B（各自根）**：``file_name`` 是裸文件名，每个 split 一个根::
+
+        img_prefix = data/HeliAir/images/train
+        file_name  = clip000_f0000.jpg           -> data/HeliAir/images/train/clip000_f0000.jpg
+
+    如果只按一种约定写死，另一种就会"一张图都找不到"，而且因为循环里
+    ``continue`` 掉，最终表现为**静默产出空数据集** —— 最难发现的一类错误。
+
+    这里依次尝试三种组合，命中即返回：
+      1. ``img_root / file_name``                （约定 A）
+      2. ``img_root.parent / file_name``         （约定 B 但 file_name 带前缀）
+      3. ``img_root / basename(file_name)``      （约定 A 但 img_prefix 到 split 目录）
+    """
+    fn = Path(file_name)
+    for cand in (
+        img_root / fn,
+        img_root.parent / fn,
+        img_root / fn.name,
+    ):
+        if cand.exists():
+            return cand
+    return None
+
+
+def prepare_yolo_data(
+    train_cfg: Dict[str, Any],
+    out_dir: str | Path,
+    overwrite: bool = False,
+) -> Tuple[Optional[Path], List[str]]:
+    """把 COCO 格式的数据集转成 ultralytics 需要的 YOLO 目录布局。
+
+    为什么需要
+    ----------
+    ultralytics **只认 YOLO txt 布局**，而 DetBench 的自动评测、分层统计、
+    一致性检查都基于 COCO。如果让用户手工准备两份数据，
+    必然出现"训练用这份、评测用那份、两边对不上"的问题。
+
+    这个函数在训练前自动把 COCO 转成 YOLO 布局，并对齐到同一批图像，
+    从根上消除这种不一致。
+
+    实现要点
+    --------
+    用**硬链接**而不是复制/软链接：
+
+    * 复制：数据集动辄几十 GB，白占一倍磁盘
+    * 软链接：Windows 上需要管理员权限或开发者模式
+    * 硬链接：同卷内零开销、无需权限；跨卷时自动回退为复制
+
+    Returns
+    -------
+    ``(data_yaml_path, 说明信息列表)``。无需转换时返回 ``(None, [...])``。
+    """
+    d = train_cfg.get("dataset", {})
+    splits = d.get("splits", {}) or {}
+    notes: List[str] = []
+
+    # 只有当 splits 里给的是 COCO ann_file 时才需要转换
+    need = [s for s, spec in splits.items() if spec.get("ann_file")]
+    if not need:
+        return None, ["所有 split 都已提供 YOLO 布局，无需转换"]
+
+    out_dir = Path(out_dir)
+    images_root = out_dir / "images"
+    labels_root = out_dir / "labels"
+
+    from detbench.core.io import load_coco
+    from detbench.core.metrics import boxes_area
+
+    classes = list(d.get("class_names") or [])
+    total_imgs = total_labels = 0
+
+    for split in need:
+        spec = splits[split]
+        ann = Path(spec["ann_file"])
+        if not ann.is_absolute():
+            ann = Path(d.get("data_root", ".")) / ann
+        if not ann.exists():
+            notes.append(f"⚠️ {split}: 标注不存在，跳过转换 -> {ann}")
+            continue
+
+        img_prefix = spec.get("img_prefix", "")
+        img_root = Path(img_prefix)
+        if not img_root.is_absolute():
+            img_root = Path(d.get("data_root", ".")) / img_root
+
+        ds = load_coco(ann, str(img_root), name=split)
+        ds_images = {int(im["id"]): im for im in _raw_images(ann)}
+
+        out_img = images_root / split
+        out_lbl = labels_root / split
+        out_img.mkdir(parents=True, exist_ok=True)
+        out_lbl.mkdir(parents=True, exist_ok=True)
+
+        n_lbl = 0
+        n_missing = 0
+        for s in ds.samples:
+            raw = ds_images.get(s.image_id)
+            if raw is None:
+                continue
+            src = _resolve_image(img_root, raw["file_name"])
+            if src is None:
+                n_missing += 1
+                continue
+
+            # 图像：硬链接（同卷零开销），失败则复制
+            dst = out_img / src.name
+            if not dst.exists() or overwrite:
+                _link_or_copy(src, dst)
+
+            # 标签：归一化 cxcywh
+            W, H = float(raw["width"]), float(raw["height"])
+            lines = []
+            for b, l in zip(s.boxes, s.labels):
+                bw, bh = b[2] - b[0], b[3] - b[1]
+                if bw <= 0 or bh <= 0:
+                    continue
+                cx = (b[0] + bw / 2) / W
+                cy = (b[1] + bh / 2) / H
+                lines.append(f"{int(l)} {cx:.6f} {cy:.6f} {bw / W:.6f} {bh / H:.6f}")
+            (out_lbl / (src.stem + ".txt")).write_text(
+                "\n".join(lines) + ("\n" if lines else ""), encoding="utf-8"
+            )
+            n_lbl += len(lines)
+            total_imgs += 1
+
+        total_labels += n_lbl
+        msg = f"{split}: {len(ds.samples)} 图 / {n_lbl} 标注"
+        if n_missing:
+            msg += f"  ⚠️ {n_missing} 张图找不到文件"
+        notes.append(msg)
+
+    if total_imgs == 0:
+        notes.append(
+            "⚠️ 没有转换出任何数据。常见原因：\n"
+            "     - img_prefix 与 COCO 的 file_name 组合起来找不到图像文件\n"
+            "     - 图像本身还没拷到这台设备上\n"
+            "   用 --dry-run 之外的命令先确认：python tools/main.py eval --config <配置> --dry-run"
+        )
+        return None, notes
+
+    data_yaml = out_dir / "data.yaml"
+    cfg2 = dict(train_cfg)
+    d2 = dict(d)
+    d2["root"] = str(out_dir)
+    d2["splits"] = {
+        "train": {"img_prefix": "images/train"},
+        "val": {"img_prefix": "images/val" if (images_root / "val").exists() else "images/train"},
+    }
+    if "test" in splits and (images_root / "test").exists():
+        d2["splits"]["test"] = {"img_prefix": "images/test"}
+    cfg2["dataset"] = d2
+    build_yolo_dataset_yaml(cfg2, data_yaml)
+
+    notes.append(f"共 {total_imgs} 图 / {total_labels} 标注 -> {data_yaml}")
+    return data_yaml, notes
+
+
+def _raw_images(ann_path: Path) -> List[dict]:
+    import json
+
+    with Path(ann_path).open("r", encoding="utf-8") as f:
+        return json.load(f).get("images", [])
+
+
+def _link_or_copy(src: Path, dst: Path) -> None:
+    """优先硬链接（零开销、无需权限），失败则复制。"""
+    import os
+    import shutil
+
+    try:
+        os.link(src, dst)
+        return
+    except (OSError, NotImplementedError):
+        pass
+    try:
+        shutil.copy2(src, dst)
+    except Exception:
+        pass
 
 
 # --------------------------------------------------------------------------- #

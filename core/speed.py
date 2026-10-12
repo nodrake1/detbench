@@ -44,15 +44,53 @@ class SpeedResult:
     iters: int = 0
     notes: Dict[str, Any] = field(default_factory=dict)
 
+    #: 测量是否可信。计时器精度有限（Windows 上 time.perf_counter 约 100ns
+    #: 量级），如果单次前向快到接近这个量级，算出的 FPS 会是个天文数字
+    #: （实测见过 166666.7 FPS），放进论文表格只会闹笑话。
+    reliable: bool = True
+    warning: str = ""
+
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
 
+def cuda_is_usable(device: str) -> bool:
+    """判断 ``device`` 是否真的能用 CUDA。
+
+    ⚠️ 光看 ``device.startswith("cuda")`` 不够。**CPU-only 版的 torch
+    里 ``torch.cuda`` 的一些函数根本不存在**（不是返回 False，而是
+    直接抛 ``AttributeError: module 'torch._C' has no attribute
+    '_cuda_resetPeakMemoryStats'``）。
+
+    实测：``torch 2.14.1+cpu`` 上调用 ``torch.cuda.reset_peak_memory_stats()``
+    就是这个报错。而 CPU-only 安装非常常见 —— CI、无独显的笔记本、
+    只用 CPU 推理的部署环境都是。所以必须显式判断，不能只看设备字符串。
+    """
+    if not device.startswith("cuda"):
+        return False
+    try:
+        import torch
+
+        return bool(torch.cuda.is_available()) and hasattr(
+            torch.cuda, "reset_peak_memory_stats"
+        )
+    except Exception:
+        return False
+
+
 def _sync(device: str) -> None:
-    if device.startswith("cuda"):
+    """CUDA 是异步的，不 synchronize 会测出接近 0 的"假延迟"。
+
+    测速本身失败不该让整个评测崩掉，所以这里吞掉异常。
+    """
+    if not cuda_is_usable(device):
+        return
+    try:
         import torch
 
         torch.cuda.synchronize()
+    except Exception:
+        pass
 
 
 def measure_speed(
@@ -73,12 +111,21 @@ def measure_speed(
     warmup : 预热次数
     iters : 测量次数
     model : 可选，用于统计参数量与峰值显存
-    """
-    if device.startswith("cuda"):
-        import torch
 
-        torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats()
+    Notes
+    -----
+    显存统计是**尽力而为**：CPU-only 的 torch 构建、或 CUDA 不可用时，
+    ``peak_vram_mb`` 记为 0，但延迟与 FPS 照常测量。
+    """
+    use_cuda = cuda_is_usable(device)
+    if use_cuda:
+        try:
+            import torch
+
+            torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats()
+        except Exception:
+            use_cuda = False
 
     # ---- 预热 ----
     for _ in range(max(0, warmup)):
@@ -97,10 +144,13 @@ def measure_speed(
     std_ms = statistics.pstdev(latencies) if len(latencies) > 1 else 0.0
 
     peak_mb = 0.0
-    if device.startswith("cuda"):
-        import torch
+    if use_cuda:
+        try:
+            import torch
 
-        peak_mb = torch.cuda.max_memory_allocated() / (1024 ** 2)
+            peak_mb = torch.cuda.max_memory_allocated() / (1024 ** 2)
+        except Exception:
+            peak_mb = 0.0  # 显存统计尽力而为，拿不到就记 0
 
     params_m = 0.0
     if model is not None:
@@ -108,6 +158,20 @@ def measure_speed(
             params_m = sum(p.numel() for p in model.parameters()) / 1e6
         except Exception:
             params_m = 0.0
+
+    # 合理性检查：单次前向快到接近计时器分辨率时，FPS 没有意义。
+    # 阈值取 50 微秒 —— 真实检测模型在 CPU 上也不可能快到这一步，
+    # 出现这种数字只可能是"模型几乎没干活"或"计时坏了"。
+    reliable = True
+    warning = ""
+    if median_ms < 0.05:
+        reliable = False
+        warning = (
+            f"单次前向仅 {median_ms * 1000:.1f} 微秒，已接近计时器分辨率，"
+            f"由此算出的 {1000.0 / max(median_ms, 1e-9):.0f} FPS 不可信。"
+            "常见原因：模型几乎不做计算（如占位检测器），或推理被缓存/短路。"
+            "请勿把这个 FPS 写进论文。"
+        )
 
     return SpeedResult(
         fps=(1000.0 / median_ms) * batch_size if median_ms > 0 else 0.0,
@@ -120,6 +184,8 @@ def measure_speed(
         device=device,
         warmup=warmup,
         iters=iters,
+        reliable=reliable,
+        warning=warning,
     )
 
 

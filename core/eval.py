@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 
-from detbench.core.io import DetDataset, DetPrediction, DetSample
+from detbench.core.io import DetDataset, DetPrediction, DetSample, resolve_image_root
 from detbench.core.metrics import (
     AREA_BINS,
     FINE_AREA_BINS,
@@ -51,13 +51,26 @@ def run_inference(
     log_every: int = 200,
 ) -> Dict[int, DetPrediction]:
     """在数据集上跑完推理，返回 ``image_id -> DetPrediction``。"""
+    # 先探测正确的图像根目录。配置里的根与 COCO 的 file_name 约定不匹配时，
+    # 每一张图都会拼出错误路径，而逐图异常捕获会让最终结果只是 mAP=0，
+    # 完全看不出原因是路径。这里提前纠正并明确提示。
+    image_root, hint = resolve_image_root(dataset.samples, image_root)
+    if hint:
+        print(f"[warn] {hint}")
+
     preds: Dict[int, DetPrediction] = {}
     t0 = time.time()
+    n_failed = 0
+    first_error: Optional[str] = None
     for i, s in enumerate(dataset.samples, 1):
         try:
             preds[s.image_id] = adapter.predict(s, image_root)
         except Exception as exc:  # 单图失败不应中断整个评测
-            print(f"[warn] 图像 {s.file_name} 推理失败：{exc}")
+            n_failed += 1
+            if first_error is None:
+                first_error = f"{type(exc).__name__}: {exc}"
+            if verbose and n_failed <= 3:
+                print(f"[warn] 图像 {s.file_name} 推理失败：{exc}")
             preds[s.image_id] = DetPrediction(
                 s.image_id,
                 np.zeros((0, 4), dtype=np.float32),
@@ -67,6 +80,21 @@ def run_inference(
         if verbose and log_every and i % log_every == 0:
             rate = i / max(time.time() - t0, 1e-9)
             print(f"  推理进度 {i}/{dataset.num_images}  ({rate:.1f} img/s)")
+
+    # 全部失败几乎一定是配置问题（路径、类别数、权重），必须显式报出来，
+    # 不能让它伪装成"模型效果差"。
+    if n_failed and n_failed == len(dataset.samples):
+        print(
+            f"\n❌ 全部 {n_failed} 张图都推理失败，这几乎一定是配置或环境问题，"
+            f"而不是模型效果差。\n"
+            f"   首个错误：{first_error}\n"
+            f"   排查建议：\n"
+            f"     - 用 --dry-run 确认图像路径解析是否正确\n"
+            f"     - 确认权重文件与本模型结构匹配\n"
+            f"     - 确认类别数与训练时一致"
+        )
+    elif n_failed:
+        print(f"[warn] 共 {n_failed}/{len(dataset.samples)} 张图推理失败，指标偏低是必然的。")
     return preds
 
 
@@ -161,6 +189,13 @@ def evaluate(
     """
     print(f"[{exp_id}] 数据集 {dataset.name}: {dataset.num_images} 图 / {dataset.num_objects} 目标")
 
+    # ---- 0. 校正图像根目录（一次，全体沿用）----
+    # 必须在推理和测速**之前**统一做，否则测速会用未校正的根目录，
+    # 抛出一个看起来毫不相关的 FileNotFoundError（实测踩过）。
+    image_root, hint = resolve_image_root(dataset.samples, image_root)
+    if hint:
+        print(f"[{exp_id}] {hint}")
+
     # ---- 1. 推理 ----
     t_inf = time.time()
     preds = run_inference(adapter, dataset, image_root)
@@ -212,6 +247,8 @@ def evaluate(
             f"{speed_res['latency_ms']:.1f} ms  "
             f"峰值显存 {speed_res['peak_vram_mb']:.0f} MB"
         )
+        if not speed_res.get("reliable", True):
+            print(f"[{exp_id}] ⚠️ {speed_res.get('warning')}")
 
     # ---- 5. 汇总落盘 ----
     desc = adapter.describe()

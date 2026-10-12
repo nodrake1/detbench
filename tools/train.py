@@ -259,7 +259,7 @@ def train_mmdet(train_cfg: dict, dist: dict, args) -> Path:
 
 
 def train_yolo(train_cfg: dict, dist: dict, args) -> Path:
-    from detbench.core.train_config import build_yolo_dataset_yaml
+    from detbench.core.train_config import build_yolo_dataset_yaml, prepare_yolo_data
 
     m = train_cfg["model"]
     t = train_cfg["training"]
@@ -267,9 +267,17 @@ def train_yolo(train_cfg: dict, dist: dict, args) -> Path:
     work_dir = Path(train_cfg.get("runtime", {}).get("work_dir", "runs/train"))
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    # 先生成 data.yaml 并支持 --dump-config —— 这样即使没装 ultralytics，
-    # 也能先检查配置对不对（配置错误是最常见的失败原因）。
-    data_yaml = build_yolo_dataset_yaml(train_cfg, work_dir / "data.yaml")
+    # ultralytics 只认 YOLO txt 布局，而 DetBench 的评测/分层统计/一致性检查
+    # 都基于 COCO。如果让用户手工准备两份数据，必然出现"训练用这份、评测用那份、
+    # 两边对不上"的问题。这里自动转换（硬链接，零磁盘开销），从根上消除不一致。
+    yolo_root = work_dir / "yolo_data"
+    data_yaml, notes = prepare_yolo_data(train_cfg, yolo_root)
+    for n in notes:
+        print(f"  数据准备: {n}")
+
+    if data_yaml is None:
+        # 配置里已经是 YOLO 布局，按原样生成 data.yaml
+        data_yaml = build_yolo_dataset_yaml(train_cfg, work_dir / "data.yaml")
     print(f"  数据集 YAML: {data_yaml}")
 
     if args.dump_config:
@@ -296,6 +304,14 @@ def train_yolo(train_cfg: dict, dist: dict, args) -> Path:
 
     model = YOLO(m.get("weights", "yolo11m.pt"))
     hr("开始训练")
+
+    # ⚠️ project / name 必须传**绝对路径**。
+    # ultralytics 会把相对的 project 解析成"相对它的 runs_dir 设置"
+    # （默认 runs/detect），于是 project="runs"、name="exp1" 会写到
+    # runs/detect/runs/exp1 —— 多出一层 runs/detect。
+    # 后果不只是路径难看：自动评测按 work_dir/weights/best.pt 找权重，
+    # 找不到就**静默跳过评测**，用户还以为训练失败了。
+    work_dir = work_dir.resolve()
     model.train(
         data=str(data_yaml),
         epochs=int(t.get("epochs", 300)),
@@ -312,6 +328,17 @@ def train_yolo(train_cfg: dict, dist: dict, args) -> Path:
     )
 
     best = work_dir / "weights" / "best.pt"
+    if not best.exists():
+        # 不静默跳过 —— 明确报出来，并给出实际落点
+        last = work_dir / "weights" / "last.pt"
+        found = sorted(p for p in Path(work_dir).rglob("best.pt"))
+        print(f"\n⚠️ 预期权重不存在: {best}")
+        if found:
+            print(f"   但在别处找到了 best.pt: {found[0]}")
+        elif last.exists():
+            print(f"   只有 last.pt: {last}")
+        print("   请检查上面 ultralytics 打印的 'Results saved to' 路径。")
+        return found[0] if found else last
     print(f"\n✅ 训练完成，最优权重: {best}")
     return best
 

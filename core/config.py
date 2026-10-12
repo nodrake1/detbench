@@ -344,14 +344,31 @@ def resolve_paths(cfg: Dict[str, Any], data_root: Optional[str] = None) -> Dict[
     cfg["dataset"] = ds
 
     # 3) 权重路径挂到配置文件目录下
+    #
+    #    ⚠️ 但**只在这个文件真的存在时才锚定**。
+    #    ultralytics 的权重可以是"模型名"而不是路径，例如::
+    #        yolo11n.yaml   -> 用内置结构从零初始化
+    #        yolo11n.pt     -> 用内置预训练权重（必要时自动下载）
+    #    如果无条件锚定成 <配置文件目录>/yolo11n.yaml，
+    #    ultralytics 就会去找一个不存在的本地文件并报错，
+    #    而这个报错看起来像"配置文件路径写错了"，非常误导。
     m = cfg.get("model")
     if isinstance(m, dict):
         m = dict(m)
         for key in ("checkpoint", "weights", "config"):
-            if m.get(key):
-                p = Path(str(m[key])).expanduser()
-                if not p.is_absolute():
-                    m[key] = str((Path(cfg["_config_dir"]) / p).resolve())
+            if not m.get(key):
+                continue
+            p = Path(str(m[key])).expanduser()
+            if p.is_absolute():
+                continue
+            # 相对路径：先看相对配置文件目录，再看相对当前工作目录；
+            # 两处都不存在就保持原样，交给后端自己解释
+            # （mmdet 的 config 缺失会在适配器里报出带 clone 提示的清晰错误）。
+            for base in (Path(cfg["_config_dir"]), Path.cwd()):
+                cand = base / p
+                if cand.exists():
+                    m[key] = str(cand.resolve())
+                    break
         cfg["model"] = m
 
     return cfg

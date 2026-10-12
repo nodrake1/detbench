@@ -151,6 +151,20 @@ git clone https://github.com/open-mmlab/mmdetection third_party/mmdetection
 pip install torch torchvision ultralytics
 ```
 
+> ⚠️ **如果你的环境里已经有 torch**，装新包时请带上约束文件锁住 numpy 大版本：
+>
+> ```bash
+> pip install -c constraints.txt ultralytics
+> ```
+>
+> 原因见 `constraints.txt` 的注释：`opencv-python` 4.8 / `matplotlib` 3.7 /
+> `pandas` 2.0 都只支持 numpy 1.x。pip 装新包时若顺手把 numpy 升到 2.x，
+> 这三个包会立刻坏掉，而且**报错五花八门、很难定位到 numpy** ——
+> 例如 `torch.from_numpy` 抛 `expected np.ndarray (got numpy.ndarray)`，
+> 或 `numpy.core.multiarray` 缺 `number` 属性。
+> 更隐蔽的一种坏法是 1.x 与 2.x 的文件混在一起（覆盖安装没清干净），
+> 表现为随机崩溃。用 `-c constraints.txt` 可以从源头避免。
+
 ### 2. 改配置
 
 复制 `configs/train_example.yaml`，主要改这几项：
@@ -193,6 +207,31 @@ torchrun --nproc_per_node=1 --nnodes=2 --node_rank=0 \
          --master_addr=<主节点IP> --master_port=29500 \
          tools/train.py --config configs/train_example.yaml
 ```
+
+### 3b. 先跑冒烟配置验证链路（强烈建议）
+
+```bash
+python tools/main.py make-demo --out data/demo
+python tools/train.py --config configs/train_smoke.yaml
+```
+
+`train_smoke.yaml` 用 **YOLO11n 从零初始化**（不下载预训练权重）、320px、2 轮，
+几十秒跑完，用来确认"训练 → 自动评测 → `result.json`"整条链路是通的。
+**它不是用来出结果的。**
+
+实测数据（RTX 4060 Ti，50 轮约 2 分钟）：
+
+```
+最终评测：mAP@[.5:.95] = 0.2080    mAP@0.5 = 0.5112    57.5 FPS / 128 MB
+
+分层结果：
+  距离档：near 0.459  >  mid 0.153  >  far 0.025
+  模糊档：light 0.459 >  heavy 0.084
+  尺寸桶：medium 0.429 > small 0.354 > tiny 0.053 > nano 0.000
+```
+
+**三个维度的排序完全符合物理直觉**（越近/越清晰/越大越准）——
+这既是"训练有效"的证据，也证明分层评测本身是自洽的。
 
 ### 4. 训练配置的三个隐蔽坑
 

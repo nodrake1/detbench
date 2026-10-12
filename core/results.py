@@ -131,6 +131,12 @@ class ExperimentResult:
     train_seconds: float = 0.0
     notes: str = ""
 
+    #: 本次实验的产物目录（result.json / predictions.npz 所在处）。
+    #: **必须记录**：exp_id 与目录名不一定相同（例如 exp_id=frcnn_random
+    #: 但 out_dir=runs/frcnn_test）。下游（如 figures）靠它定位
+    #: predictions.npz；若按 exp_id 拼路径会找不到并静默跳过出图。
+    out_dir: str = ""
+
     def __post_init__(self) -> None:
         if not self.timestamp:
             self.timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -165,6 +171,8 @@ class ExperimentResult:
         out = Path(out_dir)
         out.mkdir(parents=True, exist_ok=True)
         path = out / "result.json"
+        # 记录产物目录，供下游（figures / 事后排查）定位同目录下的 predictions.npz
+        self.out_dir = str(out.resolve())
         with path.open("w", encoding="utf-8") as f:
             json.dump(asdict(self), f, ensure_ascii=False, indent=2, default=str)
         return path

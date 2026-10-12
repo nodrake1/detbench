@@ -50,16 +50,23 @@ class YOLOv8Adapter(DetectorAdapter):
         from pathlib import Path
 
         img_path = str(Path(image_root) / sample.file_name)
-        res = self.model.predict(
-            img_path,
+
+        kwargs = dict(
             imgsz=self.imgsz,
             conf=self.conf,
             iou=self.iou,
             max_det=self.max_det,
             device=self.device,
-            half=self.half,
             verbose=False,
-        )[0]
+        )
+        # 只在显式要求半精度时才传 half。
+        # ultralytics 8.4 起用它 predict 的 half 参数会打印
+        # "'half' is deprecated ... Use 'quantize'" 警告，
+        # 每张图都打一遍会淹没有用信息。默认 False 时干脆不传。
+        if self.half:
+            kwargs["half"] = True
+
+        res = self.model.predict(img_path, **kwargs)[0]
 
         if res.boxes is None or len(res.boxes) == 0:
             return DetPrediction(

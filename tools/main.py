@@ -559,17 +559,15 @@ def cmd_figures(args: argparse.Namespace) -> int:
     # ---- 3. PR 曲线（需要 predictions.npz）----
     pr: dict[str, tuple] = {}
     for r in results:
-        npz = Path(args.runs) / r.exp_id / "predictions.npz"
-        if not npz.exists():
-            # 也试试 result.json 所在目录
-            cands = list(Path(args.runs).glob(f"**/{r.exp_id}/predictions.npz"))
-            npz = cands[0] if cands else npz
-        if not npz.exists():
+        npz = _find_predictions(r, args.runs)
+        if npz is None:
+            print(f"  - PR 曲线 [{r.exp_id}] 跳过：找不到 predictions.npz")
             continue
         try:
             preds = load_predictions(npz)
             ds = _dataset_for_figures(r, args)
             if ds is None:
+                print(f"  - PR 曲线 [{r.exp_id}] 跳过：无法重建数据集（标注文件可能已移动）")
                 continue
             from detbench.core.metrics import compute_ap
 
@@ -588,16 +586,19 @@ def cmd_figures(args: argparse.Namespace) -> int:
 
     # ---- 4. 失败案例网格（需要 predictions + 图像）----
     for r in results[: args.max_failure_sets]:
-        npz_cands = list(Path(args.runs).glob(f"**/{r.exp_id}/predictions.npz"))
-        if not npz_cands:
+        npz = _find_predictions(r, args.runs)
+        if npz is None:
+            print(f"  - 失败案例 [{r.exp_id}] 跳过：找不到 predictions.npz")
             continue
         ds = _dataset_for_figures(r, args)
         if ds is None:
+            print(f"  - 失败案例 [{r.exp_id}] 跳过：无法重建数据集")
             continue
         try:
-            preds = load_predictions(npz_cands[0])
+            preds = load_predictions(npz)
             image_root = _image_root_for_figures(r, args)
             if image_root is None:
+                print(f"  - 失败案例 [{r.exp_id}] 跳过：找不到图像根目录（可用 --images-root 指定）")
                 continue
             try_plot(
                 f"失败案例 [{r.method}]",
@@ -628,6 +629,51 @@ def cmd_figures(args: argparse.Namespace) -> int:
         print("没有生成任何图。请检查上面的跳过原因。")
         return 1
     return 0
+
+
+def _find_predictions(result, runs_root: str) -> Path | None:
+    """定位某个实验的 predictions.npz。
+
+    三级查找，从最可靠到最宽松：
+
+    1. **用 result.json 里记录的 ``out_dir``** —— 这是权威来源。
+       ``exp_id`` 与目录名不一定相同（例如 exp_id=frcnn_random 但目录是
+       runs/frcnn_test），只按 exp_id 拼路径会找不到并静默跳过出图。
+    2. **扫描所有 predictions.npz，用同目录 result.json 的 exp_id 匹配** ——
+       覆盖产物在更深一层的情况（如训练后的自动评测写在
+       runs/<exp>/eval/ 下），也兼容没有 out_dir 字段的旧结果文件。
+    3. 退回按目录名匹配。
+    """
+    # 1) 权威来源
+    out_dir = getattr(result, "out_dir", "") or ""
+    if out_dir:
+        p = Path(out_dir) / "predictions.npz"
+        if p.exists():
+            return p
+
+    root = Path(runs_root)
+    # 2) 扫描 + 用兄弟 result.json 的 exp_id 匹配
+    for npz in sorted(root.glob("**/predictions.npz")):
+        sibling = npz.parent / "result.json"
+        if not sibling.exists():
+            continue
+        try:
+            import json as _json
+
+            with sibling.open("r", encoding="utf-8") as f:
+                if _json.load(f).get("exp_id") == result.exp_id:
+                    return npz
+        except Exception:
+            continue
+
+    # 3) 按目录名兜底
+    for name in (result.exp_id, Path(out_dir).name if out_dir else ""):
+        if not name:
+            continue
+        cands = sorted(root.glob(f"**/{name}/predictions.npz"))
+        if cands:
+            return cands[0]
+    return None
 
 
 def _dataset_for_figures(result, args):

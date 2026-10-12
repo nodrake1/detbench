@@ -1,0 +1,16 @@
+# DetBench 在 conda 环境里安装可选依赖时的版本约束
+#
+# 目的：**锁住 numpy 大版本**。
+#
+# 背景：transformer 环境里的 opencv-python 4.8.1 / matplotlib 3.7.5 /
+# pandas 2.0.3 都只支持 numpy 1.x。一旦 pip 在装新包时顺手把 numpy
+# 升到 2.x，这三个包会立刻坏掉（而且报错五花八门，很难定位）。
+#
+# 用法：
+#   pip install -c constraints.txt ultralytics
+#
+numpy<2
+
+# 以下为可选保险，按需启用：
+# matplotlib<3.8      # 若你的环境是 3.7.x 且不想升级
+# opencv-python<4.10  # 若必须保持在 4.8.x

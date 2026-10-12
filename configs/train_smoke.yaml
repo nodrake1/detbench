@@ -1,0 +1,72 @@
+# DetBench 训练冒烟测试配置
+#
+# 目的：用最小规模跑通"训练 -> 自动评测 -> result.json"整条链路，
+# 验证训练脚本本身没有 bug。**不是用来出结果的。**
+#
+# 特征：
+#   * 从零初始化（yolo11n.yaml），不下载预训练权重 -> 不依赖网络
+#   * 输入 320px、2 轮、CPU 可跑 -> 几分钟内结束
+#   * 数据用占位数据集 -> 不需要真实数据
+#
+# 用法：
+#   python tools/main.py make-demo --out data/demo
+#   python tools/train.py --config configs/train_smoke.yaml
+#
+# 在真实数据上训练请用 configs/train_example.yaml。
+
+exp_id: smoke_yolo
+
+backend: ultralytics
+data_root: ..
+
+dataset:
+  name: HeliAir-demo
+  class_names: [helicopter]
+  # ultralytics 的 dataset.root 用于 data.yaml 里的 path
+  root: data/demo
+  batch_size: 4
+  num_workers: 2
+  attr_file: data/demo/metadata/frames.csv
+  splits:
+    # 注意：ultralytics 读的是 YOLO txt 布局，这里给的是图片目录；
+    # labels 需与图片同级的 labels/ 目录（见 README 的 convert 子命令）。
+    # 冒烟测试里我们用 COCO 数据 + 脚本内置的转换，所以这里只影响 data.yaml 的路径字段。
+    train:
+      ann_file: data/demo/annotations/instances_train.json
+      img_prefix: data/demo/images/train
+    val:
+      ann_file: data/demo/annotations/instances_val.json
+      img_prefix: data/demo/images/val
+    test:
+      ann_file: data/demo/annotations/instances_test.json
+      img_prefix: data/demo/images/test
+
+model:
+  # 从零初始化，避免下载预训练权重
+  weights: yolo11n.yaml
+  imgsz: 320
+  device: cpu
+  # ultralytics 后端是 0-based 标签，不需要偏移
+  label_offset: 0
+  max_per_img: 100
+
+training:
+  epochs: 2
+  amp: false          # CPU 上 AMP 无意义
+  patience: 100
+  assumed_sec_per_iter: 0.5
+  # 冒烟测试用少量数据即可，通过 --set 缩小也可以
+  val_interval: 1
+  ckpt_interval: 1
+  max_keep_ckpts: 2
+
+runtime:
+  work_dir: runs/smoke_yolo
+  device: cpu
+  seed: 0
+
+auto_eval: true
+eval:
+  predict_conf: 0.001
+  min_gt: 2
+  groups: [distance_bin, blur, __size__]

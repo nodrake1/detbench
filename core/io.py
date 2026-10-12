@@ -266,6 +266,68 @@ def _xywh_to_xyxy(boxes: np.ndarray) -> np.ndarray:
     return out
 
 
+def resolve_image_root(
+    samples: Sequence["DetSample"],
+    image_root: str | Path,
+    probe: int = 8,
+) -> Tuple[str, Optional[str]]:
+    """自动探测正确的图像根目录，返回 ``(根目录, 提示信息)``。
+
+    为什么需要这个
+    --------------
+    COCO 的 ``file_name`` 与配置里的图像根有两种常见约定，
+    真实项目里两种都会遇到::
+
+        约定 A（共享根）:  file_name = train/x.jpg,  根 = data/images
+                          -> data/images/train/x.jpg
+        约定 B（各自根）:  file_name = x.jpg,        根 = data/images/train
+                          -> data/images/train/x.jpg
+
+    两者只需其一。如果配置的根与 ``file_name`` 的约定不匹配，
+    拼出来的路径会多一层（例如 ``images/test/test/x.jpg``），
+    表现是**每一张图都推理失败**。
+
+    更糟的是：适配器里的异常会被 ``run_inference`` 逐图捕获（这是刻意的，
+    单图失败不该中断整个评测），于是最终只看到 mAP=0，
+    完全看不出真正原因是路径。所以这里主动探测并明确提示。
+
+    只抽样前若干张、只做一次探测、全体沿用，不引入每张图的开销。
+    """
+    root = Path(image_root)
+    if not samples:
+        return str(root), None
+
+    probe_samples = list(samples[:probe])
+
+    def hit(candidate: Path) -> bool:
+        return any((candidate / s.file_name).exists() for s in probe_samples)
+
+    if hit(root):
+        return str(root), None
+
+    # 多了一层：根指向了 split 子目录，而 file_name 自带 split 前缀
+    if hit(root.parent):
+        return str(root.parent), (
+            f"图像根目录已自动上移一级：{root} -> {root.parent}\n"
+            f"     原因：COCO 的 file_name 自带 split 前缀（如 'train/x.jpg'），\n"
+            f"     而配置里的图像根已经指向了 split 子目录。两者只需其一。"
+        )
+
+    # 少了一层：根指向了数据集根，而 file_name 是裸文件名
+    if root.is_dir():
+        for sub in sorted(p.name for p in root.iterdir() if p.is_dir()):
+            if hit(root / sub):
+                return str(root / sub), (
+                    f"图像根目录已自动下移到子目录：{root} -> {root / sub}\n"
+                    f"     原因：COCO 的 file_name 是裸文件名，需要拼接 split 子目录。"
+                )
+
+    return str(root), (
+        f"⚠️ 无法在 {root} 下定位到任何图像文件。\n"
+        f"     请检查配置里的图像根目录，以及图像是否已拷到这台设备上。"
+    )
+
+
 def load_coco(
     ann_file: str | Path,
     images_root: str | Path,
