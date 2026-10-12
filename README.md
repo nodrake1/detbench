@@ -2,6 +2,10 @@
 
 面向**小目标 / 对空目标检测**的可复现评测框架。
 
+> 🤖 **如果你是接手本项目的 AI agent，先读 [`AGENTS.md`](AGENTS.md)。**
+> 那份文件写的是"现在处于什么状态、哪些验证过、哪些是陷阱、别重做什么"；
+> 本 README 讲的是"怎么用"。两者互补，但交接时 AGENTS.md 更关键。
+
 它解决的问题不是"再实现一个检测器"，而是三件让你的实验结果站得住脚的事：
 
 1. **统一预处理** —— 所有模型走同一套 letterbox 与归一化，绝不让各模型自己处理。
@@ -588,14 +592,20 @@ git bundle create detbench.bundle --all
 
 ### 在新设备上（恢复项目）
 
+> 📌 **换设备后第一件事：读 [`AGENTS.md`](AGENTS.md)。**
+> 它记录了当前进度、已验证/未验证清单、以及会浪费你几小时的环境陷阱
+> （numpy 大版本、CPU-only torch、Windows 控制台编码、代理配置）。
+> 这份 README 只讲"怎么用"，`AGENTS.md` 讲"现在在哪、别踩什么"。
+
 ```bash
 git clone <仓库地址> detbench      # 或解压 detbench.zip
 cd detbench
 
 pip install numpy pillow           # 最少只要这两个
-# 真要跑模型时再装：
-pip install torch torchvision matplotlib
-pip install mmengine mmcv mmdet    # DETR 全家族
+# 真要跑模型时再装（**带约束文件，别让 pip 升坏 numpy**）：
+pip install -c constraints.txt torch torchvision matplotlib
+pip install -c constraints.txt ultralytics
+pip install -c constraints.txt mmengine mmcv mmdet    # DETR 全家族
 
 python scripts/bootstrap.py        # 一键引导
 ```
