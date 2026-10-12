@@ -12,8 +12,11 @@
     # 3. 评测一个模型
     python tools/main.py eval --config configs/example.yaml
 
-    # 4. 汇总所有实验，生成论文表格
+    #   4. 汇总所有实验，生成论文表格
     python tools/main.py report --runs runs --out report.md
+
+    # 5. 生成论文配图（需要 matplotlib）
+    python tools/main.py figures --runs runs --out figs --config configs/example.yaml
 """
 
 from __future__ import annotations
@@ -467,6 +470,195 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_figures(args: argparse.Namespace) -> int:
+    """把 runs/ 里的实验记录画成论文配图。
+
+    这是 core/viz.py 的入口 —— 没有它，那些绘图函数就是死代码。
+
+    能画什么，取决于手里有什么数据：
+
+    ============================  ==========================================
+    图                            依赖
+    ============================  ==========================================
+    尺度-mAP 曲线                 result.json 里的 mAP/<尺寸桶> 指标
+    条件 mAP 柱状图（每个属性）    result.json 里的 stratified
+    PR 曲线                       runs/*/predictions.npz
+    失败案例网格                  predictions.npz + 原始图像
+    数据集统计图                  --config 指定的数据集
+    ============================  ==========================================
+    """
+    try:
+        from detbench.core import viz
+    except Exception:
+        pass
+    try:
+        import matplotlib  # noqa: F401
+    except ImportError:
+        print(
+            "❌ 出图需要 matplotlib：\n"
+            "    pip install matplotlib\n"
+            "（评测、分层统计、结果汇总都不依赖它。）"
+        )
+        return 1
+
+    from detbench.core import viz
+    from detbench.core.eval import load_predictions
+
+    results = collect_results(args.runs)
+    if not results:
+        print(f"在 {args.runs} 下没找到任何 result.json，先跑 eval。")
+        return 1
+
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    print(f"找到 {len(results)} 个实验，输出目录 {out_dir.resolve()}\n")
+
+    made: list[Path] = []
+
+    def try_plot(label: str, fn, *a, **kw) -> None:
+        """单个图失败不应中断其余图 —— 出图是最后一步，能出一张是一张。"""
+        try:
+            p = fn(*a, **kw)
+            made.append(p)
+            print(f"  ✓ {label:34s} {p.name}")
+        except viz.VizUnavailable:
+            raise
+        except Exception as exc:
+            print(f"  ✗ {label:34s} {type(exc).__name__}: {exc}")
+
+    # ---- 1. 尺度-mAP 曲线（小目标论文最有力的一张图）----
+    curves: dict[str, dict[str, float]] = {}
+    for r in results:
+        buckets = {k.split("/", 1)[1]: v for k, v in r.metrics.items() if k.startswith("mAP/")}
+        if buckets:
+            curves[r.method if r.method not in curves else r.exp_id] = buckets
+    if curves:
+        try_plot("尺度-mAP 曲线", viz.plot_scale_curve, curves, out_dir / "scale_curve.png")
+    else:
+        print("  - 尺度-mAP 曲线                    跳过（result.json 里没有 mAP/<尺寸桶> 指标）")
+
+    # ---- 2. 每个属性维度的条件柱状图 ----
+    group_keys: list[str] = []
+    for r in results:
+        for k in r.stratified:
+            if k not in group_keys:
+                group_keys.append(k)
+    for key in sorted(group_keys):
+        by_method = {}
+        for r in results:
+            if key in r.stratified:
+                by_method[r.method if r.method not in by_method else r.exp_id] = r.stratified[key]
+        if by_method:
+            try_plot(
+                f"条件 mAP 柱状图 [{key}]",
+                viz.plot_stratified_bars,
+                by_method, key, out_dir / f"stratified_{key}.png",
+            )
+
+    # ---- 3. PR 曲线（需要 predictions.npz）----
+    pr: dict[str, tuple] = {}
+    for r in results:
+        npz = Path(args.runs) / r.exp_id / "predictions.npz"
+        if not npz.exists():
+            # 也试试 result.json 所在目录
+            cands = list(Path(args.runs).glob(f"**/{r.exp_id}/predictions.npz"))
+            npz = cands[0] if cands else npz
+        if not npz.exists():
+            continue
+        try:
+            preds = load_predictions(npz)
+            ds = _dataset_for_figures(r, args)
+            if ds is None:
+                continue
+            from detbench.core.metrics import compute_ap
+
+            res = compute_ap(
+                ds.samples, preds, iou_threshold=0.5,
+                num_classes=ds.num_classes, return_curves=True,
+            )
+            if "_curve" in res:
+                pr[r.method] = (res["_curve"]["recall"], res["_curve"]["precision"])
+        except Exception as exc:
+            print(f"  - PR 曲线 [{r.exp_id}] 跳过：{exc}")
+    if pr:
+        try_plot("PR 曲线 (IoU=0.5)", viz.plot_pr_curves, pr, out_dir / "pr_curves.png")
+    else:
+        print("  - PR 曲线                          跳过（找不到 predictions.npz 或数据集）")
+
+    # ---- 4. 失败案例网格（需要 predictions + 图像）----
+    for r in results[: args.max_failure_sets]:
+        npz_cands = list(Path(args.runs).glob(f"**/{r.exp_id}/predictions.npz"))
+        if not npz_cands:
+            continue
+        ds = _dataset_for_figures(r, args)
+        if ds is None:
+            continue
+        try:
+            preds = load_predictions(npz_cands[0])
+            image_root = _image_root_for_figures(r, args)
+            if image_root is None:
+                continue
+            try_plot(
+                f"失败案例 [{r.method}]",
+                viz.plot_failure_cases,
+                ds.samples, preds, image_root,
+                out_dir / f"failure_cases_{r.exp_id}.png",
+                max_images=args.max_images,
+            )
+        except Exception as exc:
+            print(f"  - 失败案例 [{r.exp_id}] 跳过：{exc}")
+
+    # ---- 5. 数据集统计图（需要 --config）----
+    if args.config:
+        try:
+            cfg = _load_config(args.config, data_root=args.data_root, check_paths=False)
+            ds = _build_dataset(cfg)
+            try_plot("数据集统计图", viz.plot_dataset_stats, ds, out_dir / "dataset_stats.png")
+        except Exception as exc:
+            print(f"  - 数据集统计图                      跳过：{exc}")
+    else:
+        print("  - 数据集统计图                      跳过（加 --config 可生成）")
+
+    print()
+    if made:
+        print(f"共生成 {len(made)} 张图，在 {out_dir.resolve()}")
+        print("这些图可直接放进论文；矢量图请在 viz.py 里把 savefig 后缀改成 .pdf")
+    else:
+        print("没有生成任何图。请检查上面的跳过原因。")
+        return 1
+    return 0
+
+
+def _dataset_for_figures(result, args):
+    """为某个实验重建数据集对象（画 PR 曲线与失败案例需要）。"""
+    cfg = result.config or {}
+    ds_cfg = (cfg.get("dataset") or {}) if isinstance(cfg, dict) else {}
+    ann = ds_cfg.get("ann_file")
+    if not ann or not Path(str(ann)).exists():
+        return None
+    from detbench.core.io import load_coco
+
+    attr = ds_cfg.get("attr_file")
+    return load_coco(
+        ann,
+        ds_cfg.get("images_root", ""),
+        name=ds_cfg.get("name", "dataset"),
+        attr_file=attr if attr and Path(str(attr)).exists() else None,
+    )
+
+
+def _image_root_for_figures(result, args):
+    """取图像根目录（画失败案例需要读原图）。"""
+    cfg = result.config or {}
+    ds_cfg = (cfg.get("dataset") or {}) if isinstance(cfg, dict) else {}
+    root = ds_cfg.get("images_root") or ds_cfg.get("images_dir")
+    if root and Path(str(root)).exists():
+        return str(root)
+    if args.images_root and Path(args.images_root).exists():
+        return args.images_root
+    return None
+
+
 # --------------------------------------------------------------------------- #
 # 参数解析
 # --------------------------------------------------------------------------- #
@@ -533,6 +725,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", default="report.md")
     p.add_argument("--latex", action="store_true", help="额外输出 LaTeX 表")
     p.set_defaults(func=cmd_report)
+
+    p = sub.add_parser("figures", help="把 runs/ 里的实验画成论文配图（需要 matplotlib）")
+    p.add_argument("--runs", default="runs", help="包含 result.json 的根目录")
+    p.add_argument("--out", default="figs", help="图片输出目录")
+    p.add_argument("--config", default=None,
+                   help="评测配置，用于生成数据集统计图（并把图存到 result.json 里）")
+    p.add_argument("--data-root", default=None, help="数据根目录")
+    p.add_argument("--images-root", default=None, help="图像根目录（失败案例图用，兜底）")
+    p.add_argument("--max-images", type=int, default=12, help="失败案例图最多放几张")
+    p.add_argument("--max-failure-sets", type=int, default=3,
+                   help="最多为几个实验画失败案例图（每个实验一张大图）")
+    p.set_defaults(func=cmd_figures)
 
     return ap
 

@@ -249,6 +249,7 @@ def _dump_predictions(preds: Dict[int, DetPrediction], out_dir: str) -> None:
 
     这一步很关键：**换了评测协议或指标定义时，可以直接重算，不用重跑推理。**
     推理往往是整个流程里最慢的一环（尤其 DETR 系）。
+    另外 PR 曲线与失败案例图也依赖它，所以它同时是"出图"的数据源。
     """
     from pathlib import Path
 
@@ -263,3 +264,21 @@ def _dump_predictions(preds: Dict[int, DetPrediction], out_dir: str) -> None:
         labels=np.concatenate([preds[i].labels for i in ids]) if ids else np.zeros((0,), dtype=np.int64),
         offsets=np.cumsum([0] + [preds[i].scores.size for i in ids]).astype(np.int64),
     )
+
+
+def load_predictions(path: str | Path) -> Dict[int, DetPrediction]:
+    """读回 :func:`_dump_predictions` 写出的 npz。
+
+    有了它，画 PR 曲线和失败案例时不必重跑推理。
+    """
+    from pathlib import Path
+
+    data = np.load(Path(path))
+    ids = data["image_ids"]
+    boxes, scores, labels = data["boxes"], data["scores"], data["labels"]
+    offsets = data["offsets"]
+    out: Dict[int, DetPrediction] = {}
+    for k, img_id in enumerate(ids):
+        lo, hi = int(offsets[k]), int(offsets[k + 1])
+        out[int(img_id)] = DetPrediction(int(img_id), boxes[lo:hi], scores[lo:hi], labels[lo:hi])
+    return out

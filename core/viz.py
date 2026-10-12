@@ -50,7 +50,47 @@ def _plt():
             "savefig.bbox": "tight",
         }
     )
+
+    # 中文字体：必须显式指定。matplotlib 默认字体不含 CJK 字形，
+    # 中文标签会渲染成一排方框（"豆腐块"）而且**不报任何错**，
+    # 往往到把图贴进论文时才发现。
+    cjk = _pick_cjk_font()
+    if cjk:
+        plt.rcParams["font.sans-serif"] = [cjk, "DejaVu Sans"]
+        # 中文环境下负号也会变成方框，必须关掉 unicode_minus
+        plt.rcParams["axes.unicode_minus"] = False
+
     return plt
+
+
+def _pick_cjk_font() -> Optional[str]:
+    """找一个能显示中文的字体名；找不到返回 None。"""
+    try:
+        from matplotlib import font_manager
+    except Exception:
+        return None
+
+    # 按优先级覆盖 Windows / macOS / Linux 常见中文字体
+    preferred = (
+        "Microsoft YaHei",   # Windows 默认中文界面字体
+        "SimHei",            # Windows 黑体
+        "SimSun",            # Windows 宋体
+        "PingFang SC",       # macOS
+        "Hiragino Sans GB",  # macOS
+        "Heiti SC",          # macOS
+        "Noto Sans CJK SC",  # Linux
+        "Source Han Sans SC",
+        "WenQuanYi Micro Hei",
+        "Arial Unicode MS",
+    )
+    try:
+        available = {f.name for f in font_manager.fontManager.ttflist}
+    except Exception:
+        return None
+    for name in preferred:
+        if name in available:
+            return name
+    return None
 
 
 def _rect(box, color, lw=1.0):
@@ -65,8 +105,35 @@ def _rect(box, color, lw=1.0):
 # --------------------------------------------------------------------------- #
 
 
+def _extract_metric(value: Any, metric: str) -> float:
+    """从一个分组的取值里取出指标数值。
+
+    兼容两种写法：
+      * ``{"mAP": 0.81, "mAP50": 0.93}``  —— 完整指标字典（ExperimentResult 的格式）
+      * ``0.81``                          —— 直接给数值
+
+    做这个兼容是因为只给数值是更自然的写法，而只给数值时原实现会抛
+    ``'float' object has no attribute 'get'``，完全看不出问题在哪。
+    """
+    if isinstance(value, (int, float, np.floating)):
+        return float(value)
+    if isinstance(value, dict):
+        if metric in value:
+            v = value[metric]
+            return float(v) if isinstance(v, (int, float, np.floating)) else 0.0
+        # 常见别名兜底
+        for alias in ("mAP", "AP", "map", "AP50", "mAP50"):
+            if alias in value and isinstance(value[alias], (int, float, np.floating)):
+                return float(value[alias])
+        return 0.0
+    raise TypeError(
+        f"分组取值类型不支持: {type(value).__name__}。\n"
+        "期望 {组名: {'mAP': 数值}} 或 {组名: 数值}。"
+    )
+
+
 def plot_stratified_bars(
-    stratified_by_method: Dict[str, Dict[str, Dict[str, float]]],
+    stratified_by_method: Dict[str, Dict[str, Any]],
     group_key: str,
     out_path: str | Path,
     metric: str = "mAP",
@@ -77,9 +144,35 @@ def plot_stratified_bars(
 
     Parameters
     ----------
-    stratified_by_method : ``{方法名: {组名: {指标: 值}}}``，
-        即把多个 ``ExperimentResult.stratified[group_key]`` 收集到一起。
+    stratified_by_method : ``{方法名: {组名: 取值}}``。取值可以是
+
+        * 完整指标字典（``ExperimentResult.stratified[group_key]`` 的格式）::
+
+              {"YOLO11": {"near": {"mAP": 0.93, "mAP50": 0.97}, ...}}
+
+        * 直接给数值（更省事）::
+
+              {"YOLO11": {"near": 0.93, "mid": 0.78, "far": 0.31}}
+
+    group_key : 仅用于默认标题与报错信息
+    metric : 取值是字典时，取哪个键
+    group_order : 指定柱子顺序；不指定则按组名字母序
     """
+    # 先做输入校验，避免后续抛出难以理解的 AttributeError
+    if not isinstance(stratified_by_method, dict) or not stratified_by_method:
+        raise ValueError(
+            f"分组 '{group_key}' 没有任何数据。\n"
+            "stratified_by_method 应为 {方法名: {组名: 取值}}，且不能为空。"
+        )
+    for method, groups_of_method in stratified_by_method.items():
+        if not isinstance(groups_of_method, dict):
+            raise TypeError(
+                f"方法 '{method}' 的取值应是 {{组名: 取值}} 字典，"
+                f"实际是 {type(groups_of_method).__name__}。\n"
+                "正确写法：{'方法名': {'组名': 0.81}} 或 "
+                "{'方法名': {'组名': {'mAP': 0.81}}}"
+            )
+
     plt = _plt()
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -101,7 +194,10 @@ def plot_stratified_bars(
 
     fig, ax = plt.subplots(figsize=(max(4.5, 1.2 * len(groups)), 3.2))
     for i, method in enumerate(methods):
-        vals = [stratified_by_method[method].get(g, {}).get(metric, 0.0) for g in groups]
+        vals = [
+            _extract_metric(stratified_by_method[method].get(g, 0.0), metric)
+            for g in groups
+        ]
         ax.bar(x + i * width - 0.4 + width / 2, vals, width, label=method)
     ax.set_xticks(x)
     ax.set_xticklabels(groups, rotation=20, ha="right")
@@ -152,6 +248,7 @@ def plot_scale_curve(
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     fig, ax = plt.subplots(figsize=(4.5, 3.2))
+    all_x: set[float] = set()
     for method, buckets in curves_by_method.items():
         pts: List[Tuple[float, float]] = []
         for name, val in buckets.items():
@@ -161,9 +258,22 @@ def plot_scale_curve(
         pts.sort()
         if pts:
             xs, ys = zip(*pts)
-            ax.plot(xs, ys, marker="o", ms=3, label=method)
-    if log_x:
+            ax.plot(xs, ys, marker="o", ms=4, lw=1.4, label=method)
+            all_x.update(xs)
+
+    if log_x and all_x:
         ax.set_xscale("log")
+        # 关键：显式指定刻度位置，否则 matplotlib 会在对数轴上堆一堆
+        # 密集的次刻度标签（"2×10¹ 3×10¹ 4×10¹..."），互相重叠完全不可读。
+        ticks = sorted(all_x)
+        ax.set_xticks(ticks)
+        # 用普通数字格式，避免科学计数法标签过长
+        ax.xaxis.set_major_formatter(
+            plt.FuncFormatter(lambda v, _pos: f"{v:g}")
+        )
+        ax.xaxis.set_minor_formatter(plt.NullFormatter())
+        ax.tick_params(axis="x", which="minor", length=0)
+
     ax.set_xlabel("Equivalent object side length (px)" + (" — log scale" if log_x else ""))
     ax.set_ylabel("mAP")
     ax.set_title(title)
@@ -308,9 +418,17 @@ def plot_dataset_stats(dataset, out_path: str | Path) -> Path:
     fig, axes = plt.subplots(1, 4, figsize=(13, 2.9))
 
     if areas:
-        axes[0].hist(np.sqrt(np.concatenate(areas)), bins=40, color="steelblue")
+        side = np.sqrt(np.concatenate(areas))
+        # 用对数分箱：目标尺寸跨度常有 2~3 个数量级，线性分箱会把
+        # 小目标全挤在第一个箱里，看不出分布形状。
+        bins = np.logspace(np.log10(max(side.min(), 0.5)), np.log10(side.max() + 1e-6), 25)
+        axes[0].hist(side, bins=bins, color="steelblue")
+        axes[0].set_xscale("log")
+        # 对数轴必须显式控制刻度，否则主/次刻度标签会糊成一团
+        axes[0].xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _p: f"{v:g}"))
+        axes[0].xaxis.set_minor_formatter(plt.NullFormatter())
+        axes[0].tick_params(axis="x", which="minor", length=0)
     axes[0].set_xlabel("Equivalent side length (px)")
-    axes[0].set_xscale("log")
     axes[0].set_ylabel("#objects")
     axes[0].set_title("(a) Object size distribution")
 

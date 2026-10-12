@@ -749,6 +749,40 @@ python tools/main.py report --runs runs --out report.md --latex
 
 ## 论文配图
 
+一条命令把所有实验结果画成论文配图：
+
+```bash
+python tools/main.py figures --runs runs --out figs --config configs/example.yaml
+```
+
+输出（能画哪些取决于手里有什么数据）：
+
+```
+找到 2 个实验，输出目录 .../figs
+
+  ✓ 尺度-mAP 曲线                          scale_curve.png
+  ✓ 条件 mAP 柱状图 [__size__]              stratified___size__.png
+  ✓ 条件 mAP 柱状图 [blur]                  stratified_blur.png
+  ✓ 条件 mAP 柱状图 [distance_bin]          stratified_distance_bin.png
+  ✓ 条件 mAP 柱状图 [lighting]              stratified_lighting.png
+  ✓ PR 曲线 (IoU=0.5)                      pr_curves.png
+  ✓ 失败案例 [Dummy(jitter)]               failure_cases_demo_dummy_jitter.png
+  ✓ 失败案例 [Dummy(perfect)]              failure_cases_demo_dummy_perfect.png
+  ✓ 数据集统计图                             dataset_stats.png
+```
+
+| 图 | 依赖 | 论文里的位置 |
+|---|---|---|
+| 尺度-mAP 曲线 | `result.json` 里的 `mAP/<尺寸桶>` | 实验章核心图，一眼看出小目标崩盘 |
+| 条件 mAP 柱状图 | `result.json` 里的 `stratified` | 回答"在什么条件下谁更好" |
+| PR 曲线 | `runs/*/predictions.npz` | 多方法对比 |
+| 失败案例网格 | `predictions.npz` + 原始图像 | 定性分析；主动展示失败案例比藏着强 |
+| 数据集统计图 | `--config` 指定的数据集 | Dataset 章节标准四联图 |
+
+单张图失败不会中断其余图（出图是最后一步，能出一张是一张），跳过原因会打印出来。
+
+### 当成库调用
+
 ```python
 from detbench.core.viz import (
     plot_scale_curve,        # 目标尺寸 -> mAP 曲线（小目标论文最有力的一张图）
@@ -758,16 +792,35 @@ from detbench.core.viz import (
     plot_dataset_stats,      # 尺寸分布/宽高比/位置热力图/每图目标数
 )
 
-# 尺度曲线：横轴等效边长，纵轴 mAP，一眼看出小目标崩盘
+# 尺度曲线：横轴等效边长，纵轴 mAP
 plot_scale_curve(
     {"YOLO11": {"nano(<8px)": 0.11, "tiny(8-16px)": 0.35, "small(16-32px)": 0.62},
      "DINO-DETR": {"nano(<8px)": 0.07, "tiny(8-16px)": 0.41, "small(16-32px)": 0.66}},
     "figs/scale_curve.pdf",
 )
+
+# 条件柱状图支持两种写法，任选
+plot_stratified_bars({"本方法": {"near": 0.95, "far": 0.43}}, "距离档", "figs/bars.pdf")
+plot_stratified_bars({"本方法": {"near": {"mAP": 0.95}}}, "距离档", "figs/bars.pdf")
 ```
+
+### 三个已处理好的坑
+
+1. **中文字体自动选择**。matplotlib 默认字体不含 CJK 字形，中文标签会渲染成
+   一排方框（"豆腐块"）**且不报任何错**，往往到把图贴进论文时才发现。
+   `_pick_cjk_font()` 会按 Windows/macOS/Linux 常见字体优先级自动挑选，
+   并关掉 `axes.unicode_minus`（否则负号也是方框）。
+2. **对数轴刻度不再重叠**。尺度曲线和尺寸分布图都用对数横轴，
+   不显式控制刻度就会堆出 `4×10⁰ 6×10⁰ 10¹ 2×10¹ 3×10¹…` 这种糊成一团的标签。
+   现在用普通数字格式并关闭次刻度标签。
+3. **参数校验前置**。传错数据层级时会抛出说明清楚的 `TypeError`
+   （而不是 `'float' object has no attribute 'get'`）。
 
 需要 matplotlib。缺失时会抛出 `VizUnavailable` 并给出安装提示，
 评测、分层统计、结果汇总都不依赖它。
+
+想输出矢量图，把 `viz.py` 里的 `savefig` 后缀从 `.png` 改成 `.pdf` 即可，
+论文排版时放大不失真。
 
 ---
 
@@ -808,6 +861,9 @@ python tools/main.py make-demo --out data/demo       # 生成占位数据集
 python tools/main.py selftest                        # 指标实现自检（改代码后必跑）
 python tools/main.py eval --config configs/exp1.yaml # 评测一个模型
 python tools/main.py report --runs runs --out report.md --latex   # 汇总出论文表
+python tools/main.py figures --runs runs --out figs --config configs/example.yaml  # 生成论文配图
+
+python scripts/check_viz.py                          # 绘图函数自检（需要 matplotlib）
 
 python scripts/check_pipeline.py                     # 行为合理性检查（单调性等）
 python scripts/check_mmdet_adapter.py                # DETR 适配器逻辑自检（不需要装 mmdet）
