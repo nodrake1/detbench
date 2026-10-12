@@ -158,15 +158,34 @@ jobs:
       - name: 耗时预估
         run: python tools/train.py --config configs/train_example.yaml --backend ultralytics --estimate-only
 
-      - name: 检查生成的 data.yaml
+      - name: 检查生成的 data.yaml 与自动转换产物
         shell: bash
         run: |
           set -e
-          f=runs/demo_dino_r50/data.yaml
-          test -f "$f"
-          grep -q "nc: 1" "$f"
-          grep -q "helicopter" "$f"
-          echo "data.yaml 内容正确"
+          # data.yaml 的位置由 prepare_yolo_data 决定（会写到 <work_dir>/yolo_data/），
+          # 所以不要写死路径 —— 用 find 定位，避免 CI 脚本随实现变化而过时。
+          f=$(find runs -name data.yaml | head -1)
+          if [ -z "$f" ]; then
+            echo "❌ 没有找到 data.yaml"
+            find runs -type f | head -20
+            exit 1
+          fi
+          echo "找到 data.yaml: $f"
+          cat "$f"
+          grep -q "nc: 1" "$f" || { echo "❌ data.yaml 里 nc 不是 1"; exit 1; }
+          grep -q "helicopter" "$f" || { echo "❌ data.yaml 里缺少类别名"; exit 1; }
+
+          # 更强的一层：确认 COCO -> YOLO 自动转换真的产出了数据
+          d=$(dirname "$f")
+          test -d "$d/images/train" || { echo "❌ 缺少 images/train"; exit 1; }
+          test -d "$d/labels/train" || { echo "❌ 缺少 labels/train"; exit 1; }
+          n_img=$(ls "$d/images/train" | wc -l)
+          n_lbl=$(ls "$d/labels/train" | wc -l)
+          echo "转换产物: $n_img 图 / $n_lbl 标签"
+          [ "$n_img" -gt 0 ] || { echo "❌ 没有转换出图像"; exit 1; }
+          [ "$n_lbl" -gt 0 ] || { echo "❌ 没有转换出标签"; exit 1; }
+
+          echo "✅ data.yaml 与转换产物都正确"
 
   # ------------------------------------------------------------------ #
   # 代码卫生：语法编译检查（不需要任何第三方依赖）
